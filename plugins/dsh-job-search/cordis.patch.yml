@@ -1,0 +1,23 @@
+# Bundle patch applied over the selected DSH profile when this package is
+# listed in dsh.profile.bundles. The row id is deployment-local; the package
+# name must match package.json.
+#
+# Requires the profile to already provide the storage stack
+# (@deepseek-ai/dsh-storage + a backend + @deepseek-ai/dsh-storage-domain) —
+# the shipped web profile does. defaultTenantId is the tenant used when a tool
+# call omits tenant_id; portals is the JSON-feed adapter list. The profile's
+# own cordis.patch.yml overrides anything here.
+#
+# Example portals entry (a public or self-hosted JSON aggregator):
+#   portals:
+#     - id: freehire
+#       label: FreeHire
+#       searchUrl: 'https://freehire.me/api/jobs?search={query}&location={location}'
+#       enabled: true
+
+- insert:
+    - id: job-search
+      name: 'dsh-job-search'
+      config:
+        defaultTenantId: default
+        portals: []

@@ -7,6 +7,7 @@ DeepSeek Harness（DSH）插件集合 monorepo。每个子目录 `plugins/<name>
 | 目录 | 说明 |
 | --- | --- |
 | `plugins/dsh-plane` | Plane（makeplane）项目跟踪：`plane_*` 工具族、设置卡片（设置 → 插件）、better-sidebar 面板 |
+| `plugins/dsh-job-search` | 租户隔离求职：`job_search_*` 工具族（建档/抓取/排序/投递/面试/结果）+ 会话头部"求职看板" |
 
 ## 安装某个插件到 dsh profile
 
