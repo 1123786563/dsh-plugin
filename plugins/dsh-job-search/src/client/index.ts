@@ -1,9 +1,8 @@
 /**
- * dsh-job-search, browser half: one session-header action rendering the
+ * dsh-job-search, browser half: one better-sidebar tab rendering the
  * deployment's job-search pipeline (profile line, application funnel, recent
- * jobs and applications) from the Host's read-only pipeline route. All data
- * crosses the inject face; the component holds no state of its own beyond
- * popover visibility.
+ * jobs and applications) from the Host's read-only pipeline route. One shared
+ * controller backs the panel; the Host owns all tenant scoping.
  *
  * Failure policy: mounting problems are logged, never thrown — the web shell
  * must not lose a session because one plugin's UI half misbehaved.
@@ -11,34 +10,42 @@
  * @module dsh-job-search/client
  */
 
+import { createElement } from 'react'
 import { JobSearchDashboardController } from './controller.ts'
-import { JobSearchAction } from './JobSearchAction.tsx'
-import { en, NS, zh } from './locales.ts'
+import { JobSearchPanel } from './JobSearchPanel.tsx'
+import type { PanelController } from './JobSearchPanel.tsx'
+import { dictionary, en, NS, zh } from './locales.ts'
 
 /** Minimal client-context surface this plugin uses (services are duck-typed). */
 interface JobSearchClientContext {
   effect(register: () => (() => void) | void, label?: string): () => void
+  inject(deps: readonly string[], callback: (scoped: JobSearchClientContext & Record<string, unknown>) => void, label?: string): unknown
   on(event: string, listener: () => void): () => void
   locale: { register(ns: string, dicts: { zh: unknown, en: unknown }): () => void }
-  slots: {
-    inject(name: string, register: () => (() => void) | void): void
-    register(options: Record<string, unknown>, component: (props: never) => unknown): () => void
-  }
 }
 
-/** Required services: the slot registry and the locale dictionaries. */
-export const inject = ['slots', 'locale']
+/** better-sidebar's tab descriptor, duck-typed. */
+interface SidebarTabDescriptor {
+  id: string
+  title: () => string
+  icon: (size: number) => unknown
+  order?: number
+  single?: boolean
+  component: () => unknown
+}
+
+/** Required services: the locale dictionaries (the tab injects betterSidebar dynamically). */
+export const inject = ['locale']
 
 /**
- * Mount the browser half: locale dictionaries plus the session-header
- * dashboard action, with one shared controller (the pipeline is host-global,
- * not per-session).
+ * Mount the browser half: locale dictionaries plus — when better-sidebar is
+ * installed — the left-side pipeline panel, with one shared controller.
  * @param ctx - client root context.
  */
 export function apply(ctx: JobSearchClientContext): void {
   const controller = new JobSearchDashboardController()
-  // Seed the view once the plugin activates, so the dashboard is populated
-  // before the first interaction; `ensure` never rejects.
+  // Seed the view once the plugin activates, so the panel is populated before
+  // the first open; `ensure` never rejects.
   void controller.ensure()
 
   try {
@@ -50,7 +57,7 @@ export function apply(ctx: JobSearchClientContext): void {
       }
     }, 'job-search: dictionaries')
   } catch {
-    // The header action keeps its navigator-language fallback dictionary.
+    // The panel keeps its navigator-language fallback dictionary.
   }
 
   try {
@@ -61,28 +68,7 @@ export function apply(ctx: JobSearchClientContext): void {
     // A context without the connection event simply never refreshes on reconnect.
   }
 
-  try {
-    ctx.slots.inject('conversation.session.header.actions', () => {
-      try {
-        return ctx.slots.register({
-          name: 'conversation.session.header.actions',
-          id: 'job-search',
-          // After the background-job list: process work reads before tenant data.
-          order: 30,
-          locale: NS,
-          inject: () => ({
-            hooks: { pipeline: controller },
-            refresh: () => controller.refresh(),
-          }),
-        }, JobSearchAction as unknown as (props: never) => unknown)
-      } catch (error) {
-        console.error('[job-search] header action registration failed:', error)
-        return () => {}
-      }
-    })
-  } catch (error) {
-    console.error('[job-search] slot inject failed:', error)
-  }
+  mountSidebarTab(ctx, controller)
 
   try {
     ctx.effect(() => () => {
@@ -93,7 +79,36 @@ export function apply(ctx: JobSearchClientContext): void {
   }
 }
 
-export { JobSearchAction }
+/**
+ * Register the pipeline panel tab when the betterSidebar service exists; its
+ * absence never blocks the rest of the plugin (dynamic inject).
+ * @param ctx - client root context.
+ * @param controller - the shared pipeline controller.
+ */
+function mountSidebarTab(ctx: JobSearchClientContext, controller: JobSearchDashboardController): void {
+  try {
+    ctx.inject(['betterSidebar'], scoped => {
+      const sidebar = (scoped as { betterSidebar?: { registerTab(descriptor: SidebarTabDescriptor): () => void } }).betterSidebar
+      if (sidebar === undefined) return
+      try {
+        scoped.effect(() => sidebar.registerTab({
+          id: 'dsh-job-search:panel',
+          title: () => dictionary()['tab.title'],
+          icon: size => createElement('span', { 'aria-hidden': true, style: { fontSize: Math.max(12, size - 2), lineHeight: 1 } }, '🧭'),
+          order: 56,
+          single: true,
+          component: () => JobSearchPanel({ controller: controller as unknown as PanelController }),
+        }), 'job-search: better-sidebar tab')
+      } catch {
+        // A tab-type collision (double injection) breaks nothing else.
+      }
+    }, 'job-search: sidebar')
+  } catch {
+    // Without better-sidebar the plugin contributes nothing browser-side.
+  }
+}
+
+export { JobSearchPanel }
 export type { JobSearchActionProps } from './JobSearchAction.tsx'
 export type { JobSearchDashboardView, JobSearchStatus, PipelineFetch } from './controller.ts'
 export { JobSearchDashboardController, PIPELINE_URL } from './controller.ts'

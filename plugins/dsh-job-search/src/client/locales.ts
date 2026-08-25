@@ -12,6 +12,9 @@ export const NS = 'jobSearch'
 /** Simplified Chinese dictionary (the key-set source of truth). */
 export const zh = {
   'trigger': '求职看板',
+  'tab.title': '求职面板',
+  'panel.empty': '还没有数据：先运行 job_search_setup 建档。',
+  'panel.unavailable': '求职面板不可用（控制器未挂载）。',
   'panel.aria': '求职进度看板',
   'profile.present': '档案：{name}',
   'profile.absent': '尚未建立候选人档案（先运行 job_search_setup）',
@@ -42,6 +45,9 @@ export const zh = {
 /** English dictionary, key-identical to the Chinese source of truth. */
 export const en: Record<keyof typeof zh, string> = {
   'trigger': 'Job pipeline',
+  'tab.title': 'Job pipeline',
+  'panel.empty': 'Nothing yet: run job_search_setup to create the profile.',
+  'panel.unavailable': 'Job panel unavailable (controller missing).',
   'panel.aria': 'Job search pipeline dashboard',
   'profile.present': 'Profile: {name}',
   'profile.absent': 'No candidate profile yet (run job_search_setup first)',
