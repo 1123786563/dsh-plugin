@@ -1,0 +1,20 @@
+# Bundle patch applied over the selected DSH profile when this package is
+# listed in dsh.profile.bundles. The row id is deployment-local; the package
+# name must match package.json.
+#
+# These env-driven values are the composition base layer. The Web UI settings
+# card (Settings > Plugins, the plane namespace this plugin registers) and the
+# profile's own cordis.patch.yml both override them; card saves reconfigure
+# the tools live. An empty apiKey leaves everything registered but every call
+# fails with setup instructions.
+
+- insert:
+    - id: plane
+      name: 'dsh-plane'
+      config:
+        baseUrl: !!js process.env.PLANE_BASE_URL ?? 'https://api.plane.so'
+        apiKey: !!js process.env.PLANE_API_KEY ?? ''
+        workspaceSlug: !!js process.env.PLANE_WORKSPACE_SLUG ?? ''
+        defaultProjectId: !!js process.env.PLANE_DEFAULT_PROJECT_ID ?? ''
+        # perPage: 50
+        # timeoutMs: 30000

@@ -1,5 +1,7 @@
 packages:
   - plugins/*
 
-nodeLinker: isolated
+allowBuilds:
+  esbuild: true
 
+nodeLinker: isolated
