@@ -1,0 +1,132 @@
+{
+  "name": "dsh-multi-tenant",
+  "version": "0.3.0-rc.3",
+  "description": "Multi-tenant SaaS runtime for DeepSeek Harness with trusted Web identity, Principal-bound Agents, durable local session ownership, scoped credentials, and native MCP Tools.",
+  "author": "DeepSeek Harness community contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GuoMonth/dsh-multi-tenant.git"
+  },
+  "homepage": "https://github.com/GuoMonth/dsh-multi-tenant#readme",
+  "bugs": {
+    "url": "https://github.com/GuoMonth/dsh-multi-tenant/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest",
+    "provenance": true
+  },
+  "sideEffects": false,
+  "type": "module",
+  "main": "dist/index.mjs",
+  "types": "dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.mts",
+      "import": "./dist/runtime.mjs"
+    },
+    "./operation": {
+      "types": "./dist/operation.d.mts",
+      "import": "./dist/operation.mjs"
+    },
+    "./composition": {
+      "types": "./dist/composition.d.mts",
+      "import": "./dist/composition.mjs"
+    },
+    "./runtime-composition": {
+      "types": "./dist/runtime-composition.d.mts",
+      "import": "./dist/runtime-composition.mjs"
+    },
+    "./ingress": {
+      "types": "./dist/ingress.d.mts",
+      "import": "./dist/ingress.mjs"
+    },
+    "./credentials": {
+      "types": "./dist/credentials.d.mts",
+      "import": "./dist/credentials.mjs"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.mts",
+      "import": "./dist/mcp.mjs"
+    },
+    "./product": {
+      "types": "./dist/product.d.mts",
+      "import": "./dist/product.mjs"
+    },
+    "./web": {
+      "types": "./dist/web.d.mts",
+      "import": "./dist/web.mjs"
+    },
+    "./diagnostics": {
+      "types": "./dist/diagnostics.d.mts",
+      "import": "./dist/diagnostics.mjs"
+    },
+    "./starter": {
+      "types": "./dist/starter-plugin.d.mts",
+      "import": "./dist/starter-plugin.mjs"
+    },
+    "./store": {
+      "types": "./dist/store.d.mts",
+      "import": "./dist/store.mjs"
+    },
+    "./sqlite-store": {
+      "types": "./dist/sqlite-store.d.mts",
+      "import": "./dist/sqlite-store.mjs"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.mts",
+      "import": "./dist/testing.mjs"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "cordis.patch.yml"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "cordis",
+    "multi-tenant",
+    "multi-tenant-runtime",
+    "saas",
+    "authorization",
+    "tenant-isolation",
+    "mcp",
+    "sqlite"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1 <5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis-plugin-include": "^1.0.6",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@types/node": "^22.20.0",
+    "tsdown": "^0.22.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "prepare": "tsdown"
+  }
+}
