@@ -36,50 +36,58 @@ if (apiKey.length === 0) {
   process.exit(1)
 }
 
-const response = await fetch(`${baseURL}/chat/completions`, {
-  method: 'POST',
-  headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', accept: 'text/event-stream' },
-  body: JSON.stringify({
-    model,
-    messages: [{ role: 'user', content: '用一个汉字回答：1+1=?' }],
-    stream: true,
-    stream_options: { include_usage: true },
-  }),
-})
-
-if (!response.ok) {
-  console.error(`smoke: HTTP ${response.status} from ${baseURL}`)
-  console.error((await response.text()).slice(0, 500))
-  process.exit(2)
-}
-if (response.body === null) {
-  console.error('smoke: gateway returned no body')
-  process.exit(2)
-}
-
 let text = ''
 let usage = null
 let events = 0
-const decoder = new TextDecoder()
-let buffer = ''
-for await (const chunk of response.body) {
-  buffer += decoder.decode(chunk, { stream: true })
-  let index
-  while ((index = buffer.indexOf('\n')) >= 0) {
-    const line = buffer.slice(0, index).replace(/\r$/, '')
-    buffer = buffer.slice(index + 1)
-    if (!line.startsWith('data:')) continue
-    const data = line.slice(5).trim()
-    if (data === '[DONE]') continue
-    events += 1
-    try {
-      const parsed = JSON.parse(data)
-      text += parsed.choices?.[0]?.delta?.content ?? ''
-      if (parsed.usage !== undefined) usage = parsed.usage
-    } catch {
-      // ignore keep-alive-ish payloads
+
+// Network/transport failures (bad URL, ECONNREFUSED, mid-stream errors) exit 2,
+// the http/transport class: 0 ok · 1 config · 2 http · 3 stream.
+try {
+  const response = await fetch(`${baseURL}/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', accept: 'text/event-stream' },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: '用一个汉字回答：1+1=?' }],
+      stream: true,
+      stream_options: { include_usage: true },
+    }),
+  })
+
+  if (!response.ok) {
+    console.error(`smoke: HTTP ${response.status} from ${baseURL}`)
+    console.error((await response.text()).slice(0, 500))
+    process.exit(2)
+  }
+  if (response.body === null) {
+    console.error('smoke: gateway returned no body')
+    process.exit(2)
+  }
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true })
+    let index
+    while ((index = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, index).replace(/\r$/, '')
+      buffer = buffer.slice(index + 1)
+      if (!line.startsWith('data:')) continue
+      const data = line.slice(5).trim()
+      if (data === '[DONE]') continue
+      try {
+        const parsed = JSON.parse(data)
+        events += 1
+        text += parsed.choices?.[0]?.delta?.content ?? ''
+        if (parsed.usage !== undefined) usage = parsed.usage
+      } catch {
+        // ignore keep-alive-ish payloads
+      }
     }
   }
+} catch (error) {
+  console.error(`smoke: ${error}`)
+  process.exit(2)
 }
 
 if (events === 0) {
