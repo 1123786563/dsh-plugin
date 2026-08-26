@@ -1,0 +1,3 @@
+CREATE USER casdoor WITH PASSWORD 'casdoor';
+CREATE DATABASE casdoor OWNER casdoor;
+GRANT ALL PRIVILEGES ON DATABASE casdoor TO casdoor;

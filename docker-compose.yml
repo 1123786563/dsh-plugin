@@ -16,8 +16,9 @@
 #   * higress — 官方安装脚本自管容器生命周期，走 services/higress-gateway/install.sh
 #   * plane   — dsh-plane 面向 Plane Cloud 或既有自托管实例，无本地依赖
 #
-# casdoor 首次启动（数据卷为空时）读取 init_data.json 种子；重新播种需
-# `docker compose down -v && docker compose up -d casdoor`。
+# casdoor 首次启动（casdoor 库为空时）读取 init_data.json 种子；重新播种需
+# `docker compose down -v && docker compose up -d casdoor`（注意：-v 会连
+# openmeter/nocobase 等共享 PG 数据一起清掉）。
 #
 # openmeter 镜像从源码构建（fork 的 v3 API 是 dsh-openmeter 必需，官方镜像没有）：
 # 源码取 /Users/wuyongjun/trea/openmeter（默认值 ../openmeter 相对仓库根解析，
@@ -37,10 +38,13 @@ x-openmeter-common: &openmeter-common
 
 services:
   # ---- 认证：Casdoor IdP（casdoor-gateway + dsh-casdoor-auth 的依赖）-------
+  # 存储走下方共享 postgres（独立 casdoor 用户/库，app.ini 里配置 DSN）。
   casdoor:
     image: ${CASDOOR_IMAGE:-casbin/casdoor:latest}
     container_name: dsh-casdoor
     restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
     ports:
       # 宿主 8001 → 容器内 8000（casdoor 自身监听 8000 不变）
       - "127.0.0.1:8001:8000"
@@ -112,6 +116,8 @@ services:
       retries: 30
 
   postgres:
+    # 单实例多租户：openmeter 与 nocobase 各用独立用户/角色 + 独立库
+    # （init 脚本只在数据卷为空时执行；改用户/库后需 down -v 重置）
     image: postgres:14.20-alpine3.23
     restart: unless-stopped
     environment:
@@ -120,7 +126,9 @@ services:
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - om-pg-data:/var/lib/postgresql/data
-      - ./services/openmeter/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./services/openmeter/init.sql:/docker-entrypoint-initdb.d/01-openmeter.sql:ro
+      - ./services/nocobase/init.sql:/docker-entrypoint-initdb.d/02-nocobase.sql:ro
+      - ./services/casdoor-gateway/docker/init.sql:/docker-entrypoint-initdb.d/03-casdoor.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -190,34 +198,19 @@ services:
   # 固定版本 tag（不跟 latest 滚动）；数据在 noco-storage 卷。Casdoor 认证插件
   # 源码在 services/nocobase/plugin-auth-casdoor（构建后连同 dist 直挂进容器），
   # APPEND_PRESET_BUILT_IN_PLUGINS 使其在 install/upgrade 时自动启用。
-  nocobase-postgres:
-    image: postgres:14.20-alpine3.23
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: nocobase
-      POSTGRES_PASSWORD: nocobase
-      POSTGRES_DB: nocobase
-      PGDATA: /var/lib/postgresql/data/pgdata
-    volumes:
-      - noco-pg-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nocobase"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-
+  # PG 复用上方 postgres 单实例，独立 nocobase 用户 + nocobase 库。
   nocobase:
     image: nocobase/nocobase:2.2.2
     container_name: dsh-nocobase
     restart: unless-stopped
     init: true
     depends_on:
-      nocobase-postgres: {condition: service_healthy}
+      postgres: {condition: service_healthy}
     environment:
       APP_KEY: dsh-nocobase-app-key-2026
       ENCRYPTION_FIELD_KEY: dsh-nocobase-field-key-2026
       DB_DIALECT: postgres
-      DB_HOST: nocobase-postgres
+      DB_HOST: postgres
       DB_PORT: "5432"
       DB_DATABASE: nocobase
       DB_USER: nocobase
@@ -245,5 +238,4 @@ volumes:
   om-kafka-data:
   om-ch-data:
   om-redis-data:
-  noco-pg-data:
   noco-storage:
