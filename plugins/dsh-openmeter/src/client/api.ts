@@ -68,6 +68,30 @@ export interface BindingsPayload {
 }
 
 /**
+ * The caller's own tenant credit summary (GET /api/openmeter/me/summary).
+ * `ready` carries the Token balance (`availableTokens` absent when the
+ * entitlement reports none) and `hasAccess`; `unavailable` (OpenMeter down)
+ * omits both but keeps the local 7-day aggregates. Token balance and the CNY
+ * estimate are distinct measures, never converted into each other.
+ */
+export interface SummaryPayload {
+  ok: boolean
+  availability: 'ready' | 'unavailable'
+  tenantId: string
+  subject: string
+  /** Token balance; absent when the entitlement reports no balance. */
+  availableTokens?: number
+  /** Feature access flag; present only on `ready`. */
+  hasAccess?: boolean
+  /** Billed tokens over the last 7 days, local ring rows (best effort). */
+  usageTokens7d: number
+  /** CNY estimate over the last 7 days, CNY-currency local rows only. */
+  estimatedCny7d: number
+  /** Epoch ms of the read attempt. */
+  asOf: number
+}
+
+/**
  * Fetch one JSON route.
  * @param path - the route path (relative).
  * @param init - optional fetch init.
@@ -101,4 +125,6 @@ export const api = {
   /** POST set binding (empty customerKey clears). */
   bind: (presetId: string, customerKey: string): Promise<{ ok: boolean }> =>
     call('/api/openmeter/bindings', { method: 'POST', body: JSON.stringify({ presetId, customerKey }) }),
+  /** GET the caller's own tenant credit summary. */
+  summary: (): Promise<SummaryPayload> => call<SummaryPayload>('/api/openmeter/me/summary'),
 }
