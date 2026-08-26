@@ -8,6 +8,8 @@ DeepSeek Harness（DSH）插件集合 monorepo。每个子目录 `plugins/<name>
 | --- | --- |
 | `plugins/dsh-plane` | Plane（makeplane）项目跟踪：`plane_*` 工具族、设置卡片（设置 → 插件）、better-sidebar 面板 |
 | `plugins/dsh-job-search` | 租户隔离求职：`job_search_*` 工具族（建档/抓取/排序/投递/面试/结果）+ 会话头部"求职看板" |
+| `plugins/dsh-open-design` | OpenDesign 设计引擎技能目录：以 `open-design` 提供者向宿主技能注册表注册 77 个设计技能 + 152 个品牌级设计系统 + 固定幻灯片框架（来自 nexu-io/open-design，Apache-2.0） |
+| `plugins/dsh-openmeter` | OpenMeter 计费：LLM 调用逐条计量（WAL 至少一次投递）→ 自托管 fork；预付余额耗尽硬阻断（故障放行）；llm-cost 价格库 CNY 报价 + 即时估算；侧边栏用量面板 + 收银台（客户/充值/阻断/预设绑定） |
 
 ## 安装某个插件到 dsh profile
 

@@ -1,0 +1,27 @@
+# Bundle patch applied over the selected DSH profile when this package is
+# listed in dsh.profile.bundles. The row id is deployment-local; the package
+# name must match package.json.
+#
+# Endpoint points at the self-hosted OpenMeter fork (server component, API on
+# :8888; OSS ingest enforces no token auth by default, so the token is empty
+# on loopback and optional). The Web UI settings card and the profile's own
+# cordis.patch.yml override these values; card saves reconfigure the pipeline
+# live. An unreachable endpoint never blocks model calls (fail-open) — events
+# queue on the local WAL and drain after recovery.
+
+- insert:
+    - id: openmeter
+      name: 'dsh-openmeter'
+      config:
+        endpoint: !!js process.env.OPENMETER_ENDPOINT ?? 'http://127.0.0.1:8888'
+        token: !!js process.env.OPENMETER_TOKEN ?? ''
+        # subject keys
+        houseSubject: !!js process.env.OPENMETER_HOUSE_SUBJECT ?? 'house'
+        featureKey: !!js process.env.OPENMETER_FEATURE_KEY ?? 'dsh_llm'
+        eventType: !!js process.env.OPENMETER_EVENT_TYPE ?? 'dsh.llm.call'
+        meterSlug: !!js process.env.OPENMETER_METER_SLUG ?? 'dsh_llm_tokens'
+        # behavior
+        blockEnabled: true
+        accessCacheTtlMs: 60000
+        priceRefreshMs: 300000
+        quoteCurrency: 'CNY'
