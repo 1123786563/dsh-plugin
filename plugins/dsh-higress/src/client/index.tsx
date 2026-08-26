@@ -2,8 +2,9 @@
  * dsh-higress, browser half: the Settings > Plugins config card for the
  * llm-higress namespace the Host registers.
  *
- * Failure policy: mounting problems are logged, never thrown — the web shell
- * fails the whole boot when a plugin apply throws.
+ * Failure policy: mounting problems are swallowed, never thrown or logged —
+ * an apply throw would fail the web shell's whole boot, so the card just
+ * stays absent (openmeter-inherited behavior).
  *
  * @module dsh-higress/client
  */

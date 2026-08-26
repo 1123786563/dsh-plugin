@@ -9,6 +9,7 @@
  */
 
 import {
+  attributionHeaders,
   contentHasImage,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   isContextWindowExceededError,
@@ -195,6 +196,7 @@ export class HigressAdapter extends LlmAdapter {
     onActivity: () => void,
   ): AsyncIterable<StreamChunk> {
     const headers = {
+      ...attributionHeaders(),
       'authorization': `Bearer ${apiKey}`,
       'content-type': 'application/json',
       'accept': 'text/event-stream',

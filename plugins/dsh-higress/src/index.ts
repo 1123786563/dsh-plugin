@@ -80,15 +80,13 @@ export async function resolveConsumerKey(
  * @param config - loader-supplied entry config.
  */
 export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): void {
-  const entry = resolveConfig(config)
-  // Type-only deviation from the brief (`() => entry` there): `entry` is a
-  // ResolvedHigressOptions, which cannot flow into a `() => ConfigShape` under
+  // Type-only deviation from the brief (which closes over a resolved entry):
+  // a ResolvedHigressOptions cannot flow into a `() => ConfigShape` under
   // exactOptionalPropertyTypes (maxTokens undefined / readonly models), and
   // re-resolving it would drop `defaults.*` fields that resolveConfig nests.
   // The raw composition entry is the same shape `setSource` later installs,
   // cast exactly like the `installSettingsSection` entry below.
   let authoritative: () => ConfigShape = () => config as ConfigShape
-  let current = entry
   let lastRaw: Partial<ConfigShape> | undefined
   let lastGood: ResolvedHigressOptions | undefined
   const options = (): ResolvedHigressOptions => {

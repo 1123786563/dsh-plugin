@@ -69,6 +69,8 @@ describe('HigressAdapter', () => {
     expect(url).toBe('http://127.0.0.1:8080/v1/chat/completions')
     expect(init.method).toBe('POST')
     expect((init.headers as Record<string, string>).authorization).toBe('Bearer consumer-key')
+    // attributionHeaders() supplies the harness user-agent; assert presence, not the value.
+    expect((init.headers as Record<string, string>)['user-agent']).toBeTruthy()
     expect(JSON.parse(init.body as string)).toMatchObject({ model: 'deepseek-chat', stream: true })
   })
 
