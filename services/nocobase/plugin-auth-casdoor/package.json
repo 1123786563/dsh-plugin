@@ -1,0 +1,21 @@
+{
+  "name": "@dsh/plugin-auth-casdoor",
+  "version": "0.1.0",
+  "description": "Casdoor OIDC login for NocoBase (dsh deployment): authorization-code flow, JIT provisioning, email binding",
+  "license": "MIT",
+  "main": "dist/server/index.js",
+  "client": "dist/client/index.js",
+  "exports": {
+    ".": "./dist/server/index.js",
+    "./server": "./dist/server/index.js",
+    "./client": "./dist/client/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "server.js",
+    "client.js",
+    "README.md"
+  ]
+}

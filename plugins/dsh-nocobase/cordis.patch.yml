@@ -1,0 +1,14 @@
+# Bundle patch applied over the selected DSH profile when this package is
+# listed in dsh.profile.bundles. The row id is deployment-local; the package
+# name must match package.json.
+#
+# These env-driven values are the composition base layer. The Web UI settings
+# card (Settings > Plugins, the nocobase namespace this plugin registers) and
+# the profile's own cordis.patch.yml both override them. baseUrl points at the
+# NocoBase container from the root docker-compose.yml (127.0.0.1:13000).
+
+- insert:
+    - id: nocobase
+      name: 'dsh-nocobase'
+      config:
+        baseUrl: !!js process.env.NOCOBASE_ENDPOINT ?? 'http://127.0.0.1:13000'

@@ -1,0 +1,13 @@
+{
+  "name": "dsh-nocobase-service",
+  "version": "0.1.0",
+  "description": "NocoBase deployment assets for dsh-nocobase: casdoor auth plugin source + build + bootstrap/smoke entry points live in plugins/dsh-nocobase",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build-plugin.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

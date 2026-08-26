@@ -9,6 +9,7 @@
 # 端口（全部只绑 loopback）：
 #   casdoor    127.0.0.1:8001   认证 IdP（宿主 8000 常被占用，见 casdoor-gateway README）
 #   openmeter  127.0.0.1:8888   计费 API（dsh-openmeter 插件的默认 endpoint）
+#   nocobase   127.0.0.1:13000  低代码平台（dsh-nocobase 插件的依赖，casdoor OIDC 登录）
 #   kafka / clickhouse / postgres / redis 不映射宿主端口，仅在 compose 网络内互通
 #
 # 不在本文件里（有意为之）：
@@ -185,9 +186,64 @@ services:
       timeout: 3s
       retries: 30
 
+  # ---- 低代码平台：NocoBase（dsh-nocobase 插件的依赖）-----------------------
+  # 固定版本 tag（不跟 latest 滚动）；数据在 noco-storage 卷。Casdoor 认证插件
+  # 源码在 services/nocobase/plugin-auth-casdoor（构建后连同 dist 直挂进容器），
+  # APPEND_PRESET_BUILT_IN_PLUGINS 使其在 install/upgrade 时自动启用。
+  nocobase-postgres:
+    image: postgres:14.20-alpine3.23
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nocobase
+      POSTGRES_PASSWORD: nocobase
+      POSTGRES_DB: nocobase
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - noco-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nocobase"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  nocobase:
+    image: nocobase/nocobase:2.2.2
+    container_name: dsh-nocobase
+    restart: unless-stopped
+    init: true
+    depends_on:
+      nocobase-postgres: {condition: service_healthy}
+    environment:
+      APP_KEY: dsh-nocobase-app-key-2026
+      ENCRYPTION_FIELD_KEY: dsh-nocobase-field-key-2026
+      DB_DIALECT: postgres
+      DB_HOST: nocobase-postgres
+      DB_PORT: "5432"
+      DB_DATABASE: nocobase
+      DB_USER: nocobase
+      DB_PASSWORD: nocobase
+      INIT_ROOT_EMAIL: nocobase-admin@local.dev
+      INIT_ROOT_PASSWORD: NocoBase-Admin1
+      INIT_ROOT_NICKNAME: NocoBase Admin
+      NOCOBASE_DEFAULT_LANGUAGE: zh-CN
+      APPEND_PRESET_BUILT_IN_PLUGINS: "@dsh/plugin-auth-casdoor"
+    volumes:
+      - noco-storage:/app/nocobase/storage
+      - ./services/nocobase/plugin-auth-casdoor:/app/nocobase/storage/plugins/@dsh/plugin-auth-casdoor
+    ports:
+      - "127.0.0.1:13000:80"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:80/__health_check').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
 volumes:
   casdoor-data:
   om-pg-data:
   om-kafka-data:
   om-ch-data:
   om-redis-data:
+  noco-pg-data:
+  noco-storage:
