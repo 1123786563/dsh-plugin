@@ -144,9 +144,10 @@ describe('loadTenantSummary (OpenMeter rejection)', () => {
   })
 
   it('treats any rejection reason (not just Error) as unavailable', async () => {
-    const deps = makeDeps({ entitlement: () => Promise.reject(new Error('network timeout')) })
+    const deps = makeDeps({ entitlement: () => Promise.reject('network timeout') })
     const summary = await loadTenantSummary(makePolicy(), deps)
     expect(summary.availability).toBe('unavailable')
+    expect(JSON.stringify(summary)).not.toContain('network timeout')
   })
 })
 

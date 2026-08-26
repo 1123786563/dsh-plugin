@@ -72,9 +72,16 @@ export interface TenantSummary {
   readonly availableTokens?: number | undefined
   /** Whether the subject currently has access to the feature. */
   readonly hasAccess: boolean
-  /** Billed tokens (billed input + output) over the last 7 days, local rows. */
+  /**
+   * Billed tokens (billed input + output) over the last 7 days, local rows.
+   * Best-effort over the local ring: totals are capped by the ring limit and
+   * the caller-provided row limit, so a busy subject may see a lower bound.
+   */
   readonly usageTokens7d: number
-  /** CNY estimate over the last 7 days; CNY-currency local rows only. */
+  /**
+   * CNY estimate over the last 7 days; CNY-currency local rows only.
+   * Same ring-bound best-effort caveat as usageTokens7d.
+   */
   readonly estimatedCny7d: number
   /** Epoch ms of the read attempt, from the injected clock. */
   readonly asOf: number
@@ -107,6 +114,11 @@ export type TenantSummaryResult = TenantSummary | TenantSummaryUnavailable | Ten
  * Sum this subject's rows inside the 7-day window into token and CNY totals.
  * Tokens follow pipeline.aggregates()'s convention; only CNY-currency rows
  * contribute to the CNY estimate.
+ *
+ * Totals are best-effort over the local ring: capped by the ring limit and
+ * the caller-provided row limit, so a busy subject may see a lower bound.
+ * Subject match is exact and case-sensitive; a non-empty trimmed subject is
+ * guaranteed by resolveTenantPolicy.
  * @param rows - recent local pipeline rows.
  * @param subject - the one subject to aggregate.
  * @param now - epoch ms from the injected clock.
