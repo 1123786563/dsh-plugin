@@ -51,3 +51,12 @@ OpenMeter 侧按 meter/price 聚合出的权威金额，是收款依据。本地
 
 ### 报价币种 (Quote Currency)
 对客户报价与开票使用的货币，定为 CNY。模型上游成本多以 USD 计价，加价与汇率策略在 OpenMeter 价格表中一次性表达，插件不感知汇率。
+
+### 租户计费主体映射 (tenant→subject mapping)
+tenantId→OpenMeter subject 的显式映射表，由运营者维护，是计费归属的唯一来源；不从客户端输入推断、不隐式创建客户、绝不回退到内部户 (house)。映射到保留内部户视为配置错误（forbidden）。运营者自身的租户也必须显式映射到平台自用主体（非 house）——运营者权限 (isOperator) 与计费归属共用这一张表，但角色判定只看身份里的角色。
+
+### 策略解析 (policy resolution)
+每个受保护请求先用 Casdoor 已验签身份解析出 TenantPolicy（tenantId/principal/subject/isTenantManager/isOperator）；身份缺失→unauthenticated(401)，租户未映射→tenant-unmapped(403)，角色不足→forbidden(403)；任何 query/body 参数都不参与解析。未安装 Casdoor 身份服务时，租户侧能力不可用；运营面板在受控部署中仍按回环守卫运行。
+
+### 错误语义 (error semantics)
+401 仅表示未认证；403 覆盖未开通 (tenant-unmapped) 与越权 (forbidden)；绝不回退到其他租户或全局数据；响应不泄露客户存在性。

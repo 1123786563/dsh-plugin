@@ -3,11 +3,19 @@
  * /api/openmeter/*, guarded loopback+same-origin. Read routes are GET; the
  * cashier's writes (customers, grants, blocks, bindings) are POST.
  *
+ * Every route is an operator surface: when an auth seam is wired the request
+ * must resolve to an operator policy (loopback guard → verified identity →
+ * resolvable tenant policy → isOperator) before any OpenMeter call or store
+ * read; with no seam the stock loopback-guarded behavior is unchanged.
+ *
  * @module dsh-openmeter/routes
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { guard, readJsonBody, writeJson } from './http.ts'
+import type { GuardedResponse } from './http.ts'
+import { requireOperator, resolveTenantPolicy } from './tenant-policy.ts'
+import type { PolicyError, TenantPolicy, TenantPolicyOptions } from './tenant-policy.ts'
 import type { OpenMeterClient } from './openmeter.ts'
 import type { BalanceGate } from './gate.ts'
 import type { Forwarder } from './forwarder.ts'
@@ -22,6 +30,28 @@ export interface WebServerLike {
   register(route: { kind: 'exact', path: string, handler: (req: IncomingMessage, res: ServerResponse) => void }): () => void
 }
 
+/** Identity shape the auth seam supplies (structural subset of the Casdoor identity). */
+export interface RouteIdentity {
+  readonly tenantId: string
+  readonly userId: string
+  readonly displayName?: string
+  readonly roles: readonly string[]
+}
+
+/**
+ * The optional identity/policy seam. Absent (or reporting itself unavailable)
+ * means the stock loopback-guarded behavior: no identity service is wired in
+ * that deployment, so there is nothing to authenticate against.
+ */
+export interface RouteAuth {
+  /** Whether the identity source is live for the current request; default true. */
+  available?: () => boolean
+  identityFromRequest(req: IncomingMessage): Promise<RouteIdentity | undefined> | undefined
+  /** Operator-maintained tenantId → billing subject map; the ONLY attribution source. */
+  tenantSubjects(): Readonly<Record<string, string>>
+  policyOptions?: TenantPolicyOptions
+}
+
 /** Collaborators the routes read/write. */
 export interface RouteDeps {
   getConfig: () => Config
@@ -32,10 +62,76 @@ export interface RouteDeps {
   store: OperatorStore
   estimator: PriceEstimator
   wal: MeteringWal
+  /** Optional auth seam; omitted keeps the loopback-guarded stock behavior. */
+  auth?: RouteAuth
 }
 
 /** One mounted route set's disposer. */
 export type Disposer = () => void
+
+/**
+ * Resolve the policy for one request from the verified identity ONLY. No
+ * query, body, or header value other than what identityFromRequest itself
+ * consumes ever reaches the resolver, so client data can never select a
+ * tenant. An identity source that throws degrades to unauthenticated.
+ * @param req - the incoming request.
+ * @param auth - the wired auth seam.
+ * @returns the resolved policy, or a typed fail-closed error.
+ */
+export async function resolveRequestPolicy(req: IncomingMessage, auth: RouteAuth): Promise<TenantPolicy | PolicyError> {
+  let identity: RouteIdentity | undefined
+  try {
+    identity = await auth.identityFromRequest(req)
+  } catch {
+    identity = undefined
+  }
+  return resolveTenantPolicy(identity, auth.tenantSubjects(), auth.policyOptions)
+}
+
+/**
+ * Translate one policy error to its wire shape: unauthenticated → 401, the
+ * two 403s carry their code so clients can tell 未开通 from 越权.
+ * @param res - the response.
+ * @param error - the fail-closed resolution error.
+ * @returns always true (the response was written).
+ */
+export function writePolicyError(res: GuardedResponse, error: PolicyError): true {
+  writeJson(res, error.code === 'unauthenticated' ? 401 : 403, { ok: false, error: error.code })
+  return true
+}
+
+/**
+ * Require an operator policy for one request; composes Task 1's
+ * requireOperator so incoming error codes pass through verbatim.
+ * @param req - the incoming request.
+ * @param res - the response.
+ * @param auth - the wired auth seam.
+ * @returns the operator policy, or null once the error response was written.
+ */
+export async function requireOperatorPolicy(req: IncomingMessage, res: GuardedResponse, auth: RouteAuth): Promise<TenantPolicy | null> {
+  const policy = requireOperator(await resolveRequestPolicy(req, auth))
+  if (policy.ok) return policy
+  writePolicyError(res, policy)
+  return null
+}
+
+/**
+ * The shared route gate: loopback trust first, then (when the seam is live)
+ * an operator policy — both before any OpenMeter call or store read. The
+ * gate applies only when an auth seam is wired AND reports its identity
+ * source live for this request; stock deployments (no seam, or the identity
+ * service absent at request time) take the compatibility path.
+ * @param req - the incoming request.
+ * @param res - the response.
+ * @param deps - the wired collaborators.
+ * @returns false when the response was already written.
+ */
+async function authorizeOperator(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<boolean> {
+  if (guard(req, res)) return false
+  const auth = deps.auth
+  if (auth === undefined || !(auth.available?.() ?? true)) return true
+  return (await requireOperatorPolicy(req, res, auth)) !== null
+}
 
 /**
  * Mount every /api/openmeter route on one webServer.
@@ -50,34 +146,11 @@ export function mountRoutes(webServer: WebServerLike, deps: RouteDeps): Disposer
   }
 
   route('/api/openmeter/status', (req, res) => {
-    if (guard(req, res) || req.method !== 'GET') {
-      if (res.writableEnded) return
-      return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
-    }
-    const config = deps.getConfig()
-    writeJson(res, 200, {
-      ok: true,
-      endpoint: config.endpoint,
-      houseSubject: config.houseSubject,
-      featureKey: config.featureKey,
-      meterSlug: config.meterSlug,
-      quoteCurrency: config.quoteCurrency,
-      blockEnabled: config.blockEnabled,
-      wal: deps.wal.stats(),
-      forwarder: deps.forwarder.stats(),
-      gate: deps.gate.stats(),
-      prices: deps.estimator.stats(),
-    })
+    void handleStatus(req, res, deps)
   })
 
   route('/api/openmeter/usage', (req, res) => {
-    if (guard(req, res) || req.method !== 'GET') {
-      if (res.writableEnded) return
-      return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
-    }
-    const url = new URL(req.url ?? '/', 'http://dsh.internal')
-    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 100) || 100, 1), 500)
-    writeJson(res, 200, { ok: true, rows: deps.pipeline.usageRows(limit), aggregates: deps.pipeline.aggregates() })
+    void handleUsage(req, res, deps)
   })
 
   route('/api/openmeter/customers', (req, res) => {
@@ -102,10 +175,43 @@ export function mountRoutes(webServer: WebServerLike, deps: RouteDeps): Disposer
 }
 
 /**
+ * GET: plugin and stack health snapshot.
+ */
+async function handleStatus(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
+  if (!(await authorizeOperator(req, res, deps))) return
+  if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
+  const config = deps.getConfig()
+  writeJson(res, 200, {
+    ok: true,
+    endpoint: config.endpoint,
+    houseSubject: config.houseSubject,
+    featureKey: config.featureKey,
+    meterSlug: config.meterSlug,
+    quoteCurrency: config.quoteCurrency,
+    blockEnabled: config.blockEnabled,
+    wal: deps.wal.stats(),
+    forwarder: deps.forwarder.stats(),
+    gate: deps.gate.stats(),
+    prices: deps.estimator.stats(),
+  })
+}
+
+/**
+ * GET: recent usage rows and month-to-date aggregates.
+ */
+async function handleUsage(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
+  if (!(await authorizeOperator(req, res, deps))) return
+  if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
+  const url = new URL(req.url ?? '/', 'http://dsh.internal')
+  const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 100) || 100, 1), 500)
+  writeJson(res, 200, { ok: true, rows: deps.pipeline.usageRows(limit), aggregates: deps.pipeline.aggregates() })
+}
+
+/**
  * GET: customers + local binding/balance/block view. POST: create customer.
  */
 async function handleCustomers(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (guard(req, res)) return
+  if (!(await authorizeOperator(req, res, deps))) return
   const config = deps.getConfig()
   try {
     if (req.method === 'POST') {
@@ -153,7 +259,7 @@ async function handleCustomers(req: IncomingMessage, res: ServerResponse, deps: 
  * POST a recharge grant: {customerKey, amount}.
  */
 async function handleGrant(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (guard(req, res)) return
+  if (!(await authorizeOperator(req, res, deps))) return
   if (req.method !== 'POST') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
   try {
     const body = asRecord(await readJsonBody(req))
@@ -177,7 +283,7 @@ async function handleGrant(req: IncomingMessage, res: ServerResponse, deps: Rout
  * POST a manual block/unblock: {customerKey, blocked}.
  */
 async function handleBlock(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (guard(req, res)) return
+  if (!(await authorizeOperator(req, res, deps))) return
   if (req.method !== 'POST') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
   try {
     const body = asRecord(await readJsonBody(req))
@@ -196,7 +302,7 @@ async function handleBlock(req: IncomingMessage, res: ServerResponse, deps: Rout
  * GET: bindings + observed presets. POST: set one binding {presetId, customerKey}.
  */
 async function handleBindings(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (guard(req, res)) return
+  if (!(await authorizeOperator(req, res, deps))) return
   try {
     if (req.method === 'POST') {
       const body = asRecord(await readJsonBody(req))

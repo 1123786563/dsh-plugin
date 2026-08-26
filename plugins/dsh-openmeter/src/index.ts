@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { IncomingMessage } from 'node:http'
 import { join } from 'node:path'
 import { Config, resolveConfig } from './config.ts'
 import type { Config as ConfigShape } from './config.ts'
@@ -23,7 +24,7 @@ import { PriceEstimator } from './estimator.ts'
 import { Forwarder } from './forwarder.ts'
 import { BalanceGate } from './gate.ts'
 import { mountRoutes } from './routes.ts'
-import type { WebServerLike } from './routes.ts'
+import type { RouteAuth, RouteIdentity, WebServerLike } from './routes.ts'
 import { MeteringPipeline } from './pipeline.ts'
 import { OpenMeterClient } from './openmeter.ts'
 import { OperatorStore } from './store.ts'
@@ -146,15 +147,34 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
   }, 'openmeter: pipeline')
 
   ctx.inject(['webServer'], scoped => {
-    scoped.effect(() => mountRoutes(scoped.webServer as unknown as WebServerLike, {
-      getConfig,
-      client: () => client,
-      gate,
-      forwarder,
-      pipeline,
-      store,
-      estimator,
-      wal,
-    }), 'openmeter: routes')
+    scoped.effect(() => {
+      // Duck-typed identity seam, resolved per request so a service that
+      // appears or disappears later is honored; no package dependency on
+      // dsh-casdoor-auth. When the service is absent at request time the
+      // routes take the compatibility path (loopback guard only, today's
+      // stock behavior); when it is present but resolves no identity the
+      // routes answer 401.
+      const casdoorAuth = (): { identityFromRequest(req: IncomingMessage): Promise<RouteIdentity | undefined> } | undefined =>
+        scoped.get('casdoorAuth') as { identityFromRequest(req: IncomingMessage): Promise<RouteIdentity | undefined> } | undefined
+      const auth: RouteAuth = {
+        available: () => casdoorAuth() !== undefined,
+        identityFromRequest: req => casdoorAuth()?.identityFromRequest(req),
+        // Interim empty map at issue-#1 scope: with Casdoor wired but no
+        // mapping provisioned every route fails closed (403 tenant-unmapped);
+        // later issues source this from operator config.
+        tenantSubjects: () => ({}),
+      }
+      return mountRoutes(scoped.webServer as unknown as WebServerLike, {
+        getConfig,
+        client: () => client,
+        gate,
+        forwarder,
+        pipeline,
+        store,
+        estimator,
+        wal,
+        auth,
+      })
+    }, 'openmeter: routes')
   })
 }
