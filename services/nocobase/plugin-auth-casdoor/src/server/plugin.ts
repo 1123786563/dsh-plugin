@@ -10,7 +10,7 @@
 
 import { Plugin } from '@nocobase/server';
 import { authType } from '../constants';
-import { CasdoorAuth } from './casdoor-auth';
+import { CasdoorAuth, originOf } from './casdoor-auth';
 
 export class PluginAuthCasdoorServer extends Plugin {
   async load() {
@@ -25,8 +25,9 @@ export class PluginAuthCasdoorServer extends Plugin {
         async getAuthUrl(ctx: any, next: any) {
           const name = ctx.get('x-authenticator');
           if (!name) ctx.throw(400, 'Missing X-Authenticator header.');
+          const org = ctx.action?.params?.values?.org;
           const auth = (await ctx.app.authManager.get(name, ctx)) as CasdoorAuth;
-          const url = await auth.getAuthUrl();
+          const url = await auth.getAuthUrl(typeof org === 'string' ? org : undefined);
           ctx.body = { url };
           await next();
         },
@@ -43,7 +44,8 @@ export class PluginAuthCasdoorServer extends Plugin {
           if (!name) ctx.throw(401, 'Invalid login state payload.');
           const auth = (await ctx.app.authManager.get(name, ctx)) as CasdoorAuth;
           const { token } = await auth.signIn();
-          const back = new URL('/signin', ctx.origin);
+          const origin = originOf(ctx);
+          const back = new URL('/signin', origin);
           back.searchParams.set('authenticator', name);
           back.searchParams.set('token', token);
           ctx.redirect(back.toString());

@@ -148,6 +148,42 @@ importers:
 
   plugins/dsh-multi-tenant: {}
 
+  plugins/dsh-nocobase:
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: ^4.0.1
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-host-webserver':
+        specifier: 0.1.1-rc.2
+        version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))
+      '@deepseek-ai/dsh-settings':
+        specifier: 0.1.1-rc.2
+        version: 0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.1-rc.2(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/schemastery@3.18.1)
+      '@deepseek-ai/schemastery':
+        specifier: ^3.18.1
+        version: 3.18.1
+      '@types/node':
+        specifier: ^24.13.3
+        version: 24.13.3
+      '@types/react':
+        specifier: ^18.3.12
+        version: 18.3.31
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.0
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      tsdown:
+        specifier: 0.22.2
+        version: 0.22.2(tsx@4.23.12)(typescript@5.5.2)
+      typescript:
+        specifier: ^5.5.0
+        version: 5.5.2
+      vitest:
+        specifier: ^4.1.8
+        version: 4.1.11(@types/node@24.13.3)(vite@8.2.2(@types/node@24.13.3)(esbuild@0.25.0)(tsx@4.23.12)(yaml@2.9.0))
+
   plugins/dsh-open-design:
     devDependencies:
       '@deepseek-ai/cordis':

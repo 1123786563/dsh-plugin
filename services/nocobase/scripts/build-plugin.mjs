@@ -8,13 +8,14 @@
  */
 
 import { build } from 'esbuild'
-import { rm } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const plugin = resolve(root, 'plugin-auth-casdoor')
 const dist = resolve(plugin, 'dist')
+const NL = String.fromCharCode(10)
 
 await rm(dist, { recursive: true, force: true })
 
@@ -44,16 +45,32 @@ await build({
   logLevel: 'info',
 })
 
-await build({
+// The NocoBase web shell loads external plugin client bundles through
+// RequireJS. esbuild has no AMD output, so the CJS bundle is wrapped in the
+// AMD simplified-CommonJS form: RequireJS scans the factory source for
+// require("...") literals (the @nocobase/*, antd, react externals) and
+// resolves them against the shell's config.
+const clientBuild = await build({
   entryPoints: [resolve(plugin, 'src/client/index.tsx')],
-  outfile: resolve(dist, 'client/index.js'),
   bundle: true,
   platform: 'browser',
   format: 'cjs',
   target: 'es2019',
   jsx: 'automatic',
   external: clientExternal,
+  write: false,
   logLevel: 'info',
 })
+let clientBody = ''
+for (const file of clientBuild.outputFiles ?? []) {
+  if (!file.path.endsWith('.map')) clientBody = file.text
+}
+if (clientBody.length === 0) throw new Error('client build produced no JS output')
+await mkdir(resolve(dist, 'client'), { recursive: true })
+await writeFile(
+  resolve(dist, 'client/index.js'),
+  'define(function (require, exports, module) {' + NL + clientBody + NL + '});' + NL,
+  'utf8',
+)
 
 console.log(`built ${dist.replace(root + '/', '')}/server/index.js + client/index.js`)

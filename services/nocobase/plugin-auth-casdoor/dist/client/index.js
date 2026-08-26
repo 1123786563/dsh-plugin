@@ -1,3 +1,4 @@
+define(function (require, exports, module) {
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -93,25 +94,42 @@ var Options = () => {
 // plugin-auth-casdoor/src/client/SignInButton.tsx
 var import_client2 = require("@nocobase/client");
 var import_antd = require("antd");
+var import_react = require("react");
 var import_jsx_runtime2 = require("react/jsx-runtime");
 var SignInButton = (props) => {
-  var _a, _b;
+  var _a, _b, _c, _d, _e, _f, _g, _h;
   const api = (0, import_client2.useAPIClient)();
   const { authenticator } = props;
-  const onClick = async () => {
-    var _a2, _b2, _c, _d;
-    const response = await api.request({
-      url: "casdoorAuth:getAuthUrl",
-      method: "POST",
-      headers: { "X-Authenticator": authenticator.name }
-    });
-    const url = (_d = (_b2 = (_a2 = response == null ? void 0 : response.data) == null ? void 0 : _a2.data) == null ? void 0 : _b2.url) != null ? _d : (_c = response == null ? void 0 : response.data) == null ? void 0 : _c.url;
-    if (typeof url === "string" && url.length > 0) {
-      window.location.replace(url);
+  const [open, setOpen] = (0, import_react.useState)(false);
+  const [busy, setBusy] = (0, import_react.useState)(false);
+  const orgs = ((_e = (_d = (_a = authenticator == null ? void 0 : authenticator.options) == null ? void 0 : _a.orgs) != null ? _d : (_c = (_b = authenticator == null ? void 0 : authenticator.options) == null ? void 0 : _b.public) == null ? void 0 : _c.orgs) != null ? _e : []).map((org) => String(org).trim()).filter((org) => org.length > 0);
+  const goTo = async (org) => {
+    var _a2, _b2, _c2, _d2;
+    setBusy(true);
+    try {
+      const response = await api.request({
+        url: "casdoorAuth:getAuthUrl",
+        method: "POST",
+        headers: { "X-Authenticator": authenticator.name },
+        data: org === void 0 ? {} : { org }
+      });
+      const url = (_d2 = (_b2 = (_a2 = response == null ? void 0 : response.data) == null ? void 0 : _a2.data) == null ? void 0 : _b2.url) != null ? _d2 : (_c2 = response == null ? void 0 : response.data) == null ? void 0 : _c2.url;
+      if (typeof url === "string" && url.length > 0) {
+        window.location.replace(url);
+        return;
+      }
+    } finally {
+      setBusy(false);
     }
   };
-  const text = ((_b = (_a = authenticator == null ? void 0 : authenticator.options) == null ? void 0 : _a.public) == null ? void 0 : _b.buttonText) || (authenticator == null ? void 0 : authenticator.title) || "Sign in with Casdoor";
-  return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_antd.Button, { block: true, onClick, children: text });
+  const text = ((_f = authenticator == null ? void 0 : authenticator.options) == null ? void 0 : _f.buttonText) || ((_h = (_g = authenticator == null ? void 0 : authenticator.options) == null ? void 0 : _g.public) == null ? void 0 : _h.buttonText) || (authenticator == null ? void 0 : authenticator.title) || "Sign in with Casdoor";
+  if (orgs.length <= 1) {
+    return /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_antd.Button, { block: true, loading: busy, onClick: () => void goTo(orgs[0]), children: text });
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime2.jsxs)(import_antd.Space, { direction: "vertical", style: { width: "100%" }, size: 8, children: [
+    /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_antd.Button, { block: true, onClick: () => setOpen((value) => !value), children: text }),
+    open ? orgs.map((org) => /* @__PURE__ */ (0, import_jsx_runtime2.jsx)(import_antd.Button, { block: true, size: "small", loading: busy, onClick: () => void goTo(org), children: org === "built-in" ? `${org} (\u5E73\u53F0)` : org }, org)) : null
+  ] });
 };
 
 // plugin-auth-casdoor/src/client/index.tsx
@@ -127,3 +145,5 @@ var PluginAuthCasdoorClient = class extends import_client3.Plugin {
   }
 };
 var index_default = PluginAuthCasdoorClient;
+
+});

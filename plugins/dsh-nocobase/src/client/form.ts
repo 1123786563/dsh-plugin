@@ -97,8 +97,8 @@ interface Staged {
   clear: boolean
 }
 
-/** A draft is valid when it is an http(s) origin without a trailing slash. */
-const URL_PATTERN = /^https?:\/\/[^\s/]+$/
+/** A draft is valid when it is an http(s) URL; trailing slashes are stripped on save. */
+const URL_PATTERN = /^https?:\/\/\S+$/
 
 /** The face the card's slot registration injects (hooks + form actions). */
 export class NocobaseSettingsCardController {

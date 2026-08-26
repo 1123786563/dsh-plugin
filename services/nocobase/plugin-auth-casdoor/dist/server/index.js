@@ -44,8 +44,10 @@ var CasdoorAuth = class extends import_auth.BaseAuth {
   }
   get casdoorOptions() {
     const options = this.authenticator?.options ?? {};
+    const issuer = String(options.issuer ?? "").replace(/\/+$/, "");
     return {
-      issuer: String(options.issuer ?? "").replace(/\/+$/, ""),
+      issuer,
+      serverIssuer: String(options.serverIssuer ?? issuer).replace(/\/+$/, "") || issuer,
       clientId: String(options.clientId ?? ""),
       clientSecret: String(options.clientSecret ?? ""),
       autoSignup: options.public?.autoSignup !== false
@@ -53,22 +55,28 @@ var CasdoorAuth = class extends import_auth.BaseAuth {
   }
   /** Callback URL casdoor redirects back to (mounted in server/plugin.ts). */
   redirectUrl() {
-    return `${this.ctx.origin}/api/casdoorAuth:redirect`;
+    return `${originOf(this.ctx)}/api/casdoorAuth:redirect`;
   }
   /**
    * Build the casdoor authorize URL. `state` is a short-lived JWT signed with
    * the app's auth secret carrying the authenticator name, so the callback can
    * reconstruct this auth instance without relying on headers/cookies the
    * browser redirect cannot carry.
+   *
+   * `org` selects the casdoor login page via the shared-app client-id suffix
+   * (`<clientId>-org-<org>`); the code still exchanges against the shared
+   * client credentials, so validation stays org-agnostic.
    */
-  async getAuthUrl() {
+  async getAuthUrl(org) {
     const { issuer, clientId } = this.casdoorOptions;
+    const orgSlug = typeof org === "string" ? org.trim() : "";
+    const loginClientId = orgSlug.length > 0 && orgSlug !== "built-in" ? `${clientId}-org-${orgSlug}` : clientId;
     const state = await this.jwt.sign(
       { a: this.authenticator.name, n: (0, import_node_crypto.randomBytes)(8).toString("base64url") },
       { expiresIn: "10m" }
     );
     const params = new URLSearchParams({
-      client_id: clientId,
+      client_id: loginClientId,
       response_type: "code",
       redirect_uri: this.redirectUrl(),
       scope: "openid profile email",
@@ -82,15 +90,15 @@ var CasdoorAuth = class extends import_auth.BaseAuth {
    */
   async validate() {
     const ctx = this.ctx;
-    const { issuer, clientId, clientSecret, autoSignup } = this.casdoorOptions;
+    const { serverIssuer, clientId, clientSecret, autoSignup } = this.casdoorOptions;
     const code = String(ctx.request?.query?.code ?? "");
-    if (!issuer || !clientId || !clientSecret) {
+    if (!serverIssuer || !clientId || !clientSecret) {
       ctx.throw(400, "Casdoor authenticator is not configured (issuer / clientId / clientSecret).");
     }
     if (!code) {
       ctx.throw(400, "Missing authorization code from casdoor.");
     }
-    const claims = await this.exchangeCodeForClaims(issuer, clientId, clientSecret, code);
+    const claims = await this.exchangeCodeForClaims(serverIssuer, clientId, clientSecret, code);
     const uuid = `${UUID_PREFIX}${claims.sub}`;
     const email = typeof claims.email === "string" && claims.email.length > 0 ? claims.email : "";
     const nickname = typeof claims.name === "string" && claims.name || typeof claims.preferred_username === "string" && claims.preferred_username || claims.sub;
@@ -169,6 +177,21 @@ var CasdoorAuth = class extends import_auth.BaseAuth {
     return claims;
   }
 };
+function originOf(ctx) {
+  const request = ctx.request ?? ctx;
+  const originCandidates = [request.origin, ctx.origin, ctx.get?.("origin")];
+  const host = request.headers?.host ?? request.get?.("host") ?? ctx.get?.("host");
+  if (typeof host === "string" && host.length > 0) {
+    const scheme = originCandidates.find(
+      (candidate) => typeof candidate === "string" && candidate.startsWith("http")
+    )?.split("://")[0] ?? "http";
+    return `${scheme}://${host}`;
+  }
+  for (const candidate of originCandidates) {
+    if (typeof candidate === "string" && candidate.startsWith("http")) return candidate.replace(/\/+$/, "");
+  }
+  return "http://127.0.0.1:13000";
+}
 function decodeJwtPayload(token) {
   const parts = String(token ?? "").split(".");
   if (parts.length !== 3) return null;
@@ -192,8 +215,9 @@ var PluginAuthCasdoorServer = class extends import_server.Plugin {
         async getAuthUrl(ctx, next) {
           const name = ctx.get("x-authenticator");
           if (!name) ctx.throw(400, "Missing X-Authenticator header.");
+          const org = ctx.action?.params?.values?.org;
           const auth = await ctx.app.authManager.get(name, ctx);
-          const url = await auth.getAuthUrl();
+          const url = await auth.getAuthUrl(typeof org === "string" ? org : void 0);
           ctx.body = { url };
           await next();
         },
@@ -210,7 +234,8 @@ var PluginAuthCasdoorServer = class extends import_server.Plugin {
           if (!name) ctx.throw(401, "Invalid login state payload.");
           const auth = await ctx.app.authManager.get(name, ctx);
           const { token } = await auth.signIn();
-          const back = new URL("/signin", ctx.origin);
+          const origin = originOf(ctx);
+          const back = new URL("/signin", origin);
           back.searchParams.set("authenticator", name);
           back.searchParams.set("token", token);
           ctx.redirect(back.toString());

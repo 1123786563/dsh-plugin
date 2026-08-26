@@ -32,7 +32,12 @@ interface CasdoorClaims {
 }
 
 export interface CasdoorAuthOptions {
+  /** Browser-facing casdoor origin (authorize URL). */
   issuer: string;
+  /** Server-to-server origin; falls back to issuer. Set when browser and
+   * container reach casdoor differently (docker compose: issuer
+   * http://127.0.0.1:8001, serverIssuer http://casdoor:8000). */
+  serverIssuer: string;
   clientId: string;
   clientSecret: string;
   autoSignup: boolean;
@@ -46,8 +51,10 @@ export class CasdoorAuth extends BaseAuth {
 
   get casdoorOptions(): CasdoorAuthOptions {
     const options = (this.authenticator?.options ?? {}) as Record<string, any>;
+    const issuer = String(options.issuer ?? '').replace(/\/+$/, '');
     return {
-      issuer: String(options.issuer ?? '').replace(/\/+$/, ''),
+      issuer,
+      serverIssuer: String(options.serverIssuer ?? issuer).replace(/\/+$/, '') || issuer,
       clientId: String(options.clientId ?? ''),
       clientSecret: String(options.clientSecret ?? ''),
       autoSignup: options.public?.autoSignup !== false,
@@ -56,7 +63,7 @@ export class CasdoorAuth extends BaseAuth {
 
   /** Callback URL casdoor redirects back to (mounted in server/plugin.ts). */
   redirectUrl(): string {
-    return `${this.ctx.origin}/api/casdoorAuth:redirect`;
+    return `${originOf(this.ctx)}/api/casdoorAuth:redirect`;
   }
 
   /**
@@ -64,15 +71,23 @@ export class CasdoorAuth extends BaseAuth {
    * the app's auth secret carrying the authenticator name, so the callback can
    * reconstruct this auth instance without relying on headers/cookies the
    * browser redirect cannot carry.
+   *
+   * `org` selects the casdoor login page via the shared-app client-id suffix
+   * (`<clientId>-org-<org>`); the code still exchanges against the shared
+   * client credentials, so validation stays org-agnostic.
    */
-  async getAuthUrl(): Promise<string> {
+  async getAuthUrl(org?: string): Promise<string> {
     const { issuer, clientId } = this.casdoorOptions;
+    const orgSlug = typeof org === 'string' ? org.trim() : '';
+    const loginClientId = orgSlug.length > 0 && orgSlug !== 'built-in'
+      ? `${clientId}-org-${orgSlug}`
+      : clientId;
     const state = await this.jwt.sign(
       { a: this.authenticator.name, n: randomBytes(8).toString('base64url') },
       { expiresIn: '10m' },
     );
     const params = new URLSearchParams({
-      client_id: clientId,
+      client_id: loginClientId,
       response_type: 'code',
       redirect_uri: this.redirectUrl(),
       scope: 'openid profile email',
@@ -87,16 +102,16 @@ export class CasdoorAuth extends BaseAuth {
    */
   async validate() {
     const ctx = this.ctx as any;
-    const { issuer, clientId, clientSecret, autoSignup } = this.casdoorOptions;
+    const { serverIssuer, clientId, clientSecret, autoSignup } = this.casdoorOptions;
     const code = String(ctx.request?.query?.code ?? '');
-    if (!issuer || !clientId || !clientSecret) {
+    if (!serverIssuer || !clientId || !clientSecret) {
       ctx.throw(400, 'Casdoor authenticator is not configured (issuer / clientId / clientSecret).');
     }
     if (!code) {
       ctx.throw(400, 'Missing authorization code from casdoor.');
     }
 
-    const claims = await this.exchangeCodeForClaims(issuer, clientId, clientSecret, code);
+    const claims = await this.exchangeCodeForClaims(serverIssuer, clientId, clientSecret, code);
     const uuid = `${UUID_PREFIX}${claims.sub}`;
     const email = typeof claims.email === 'string' && claims.email.length > 0 ? claims.email : '';
     const nickname =
@@ -194,6 +209,26 @@ export class CasdoorAuth extends BaseAuth {
     }
     return claims;
   }
+}
+
+/** Resolve the request origin across koa/resourcer context shapes (never "null"). */
+export function originOf(ctx: any): string {
+  const request = ctx.request ?? ctx
+  const originCandidates = [request.origin, ctx.origin, ctx.get?.('origin')]
+  // Host header carries the port; wrapped koa request.origin has been seen
+  // dropping it behind the nocobase proxy layer, so prefer the header and
+  // borrow the scheme from any origin-shaped candidate (http fallback).
+  const host = request.headers?.host ?? request.get?.('host') ?? ctx.get?.('host')
+  if (typeof host === 'string' && host.length > 0) {
+    const scheme = originCandidates.find(
+      (candidate) => typeof candidate === 'string' && candidate.startsWith('http'),
+    )?.split('://')[0] ?? 'http'
+    return `${scheme}://${host}`
+  }
+  for (const candidate of originCandidates) {
+    if (typeof candidate === 'string' && candidate.startsWith('http')) return candidate.replace(/\/+$/, '')
+  }
+  return 'http://127.0.0.1:13000'
 }
 
 /** Decode the payload segment of a JWT without verification (identity comes from the server-to-server code exchange). */
