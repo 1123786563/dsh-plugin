@@ -118,6 +118,11 @@ describe('resolveTenantPolicy', () => {
     expect(result).toEqual({ ok: false, code: 'tenant-unmapped' })
   })
 
+  it('returns tenant-unmapped for a corrupt non-string mapping value instead of throwing', () => {
+    const corrupt = { 'tenant-a': 42 } as unknown as Readonly<Record<string, string>>
+    expect(resolveTenantPolicy(makeIdentity(), corrupt)).toEqual({ ok: false, code: 'tenant-unmapped' })
+  })
+
   it('returns forbidden when the mapping resolves to the reserved house subject', () => {
     const result = resolveTenantPolicy(makeIdentity({ tenantId: 'tenant-house' }), MAPPING)
     expect(result).toEqual({ ok: false, code: 'forbidden' })
@@ -147,12 +152,15 @@ describe('resolveTenantPolicy', () => {
   it('is a pure synchronous function that never mutates its inputs', () => {
     const mapping: Record<string, string> = { 'tenant-a': 'cust-a' }
     const identity = makeIdentity({ roles: ['owner'] })
+    const options = { managerRoles: ['owner'], operatorRoles: ['ops'], houseSubject: 'house' }
     const mappingBefore = JSON.stringify(mapping)
     const identityBefore = JSON.stringify(identity)
-    const result = resolveTenantPolicy(identity, mapping)
+    const optionsBefore = JSON.stringify(options)
+    const result = resolveTenantPolicy(identity, mapping, options)
     expect(result).not.toBeInstanceOf(Promise)
     expect(JSON.stringify(mapping)).toBe(mappingBefore)
     expect(JSON.stringify(identity)).toBe(identityBefore)
+    expect(JSON.stringify(options)).toBe(optionsBefore)
   })
 })
 
@@ -170,14 +178,25 @@ describe('role guard helpers', () => {
     expect(requireOperator(policy)).toBe(policy)
   })
 
-  it('return forbidden when the role is missing or the input is an error', () => {
+  it('preserve an incoming error verbatim instead of flattening it to forbidden', () => {
+    const unauthenticated: PolicyError = { ok: false, code: 'unauthenticated' }
+    expect(requireTenantManager(unauthenticated)).toBe(unauthenticated)
+    expect(requireOperator(unauthenticated)).toBe(unauthenticated)
+    const unmapped: PolicyError = { ok: false, code: 'tenant-unmapped' }
+    expect(requireTenantManager(unmapped)).toBe(unmapped)
+    expect(requireOperator(unmapped)).toBe(unmapped)
+  })
+
+  it('return forbidden only for an authenticated policy whose role flag is false', () => {
     const member = resolveTenantPolicy(makeIdentity(), MAPPING)
     expect(member.ok).toBe(true)
     expect(requireTenantManager(member)).toEqual({ ok: false, code: 'forbidden' })
     expect(requireOperator(member)).toEqual({ ok: false, code: 'forbidden' })
-    const error: PolicyError = { ok: false, code: 'tenant-unmapped' }
-    expect(requireTenantManager(error)).toEqual({ ok: false, code: 'forbidden' })
-    expect(requireOperator(error)).toEqual({ ok: false, code: 'forbidden' })
+  })
+
+  it('keep an absent identity unauthenticated when composed after resolveTenantPolicy', () => {
+    const guarded = requireTenantManager(resolveTenantPolicy(undefined, MAPPING))
+    expect(guarded).toEqual({ ok: false, code: 'unauthenticated' })
   })
 })
 

@@ -60,12 +60,16 @@ export interface TenantPolicyOptions {
   readonly houseSubject?: string
 }
 
-/** Defaults applied when an option is omitted; matches the plugin config. */
-export const DEFAULT_TENANT_POLICY_OPTIONS: Required<TenantPolicyOptions> = {
-  managerRoles: ['owner'],
-  operatorRoles: ['dsh-admin'],
+/**
+ * Defaults applied when an option is omitted; matches the plugin config.
+ * Frozen together with both role arrays so a JS-level consumer cannot
+ * poison the defaults.
+ */
+export const DEFAULT_TENANT_POLICY_OPTIONS: Required<TenantPolicyOptions> = Object.freeze({
+  managerRoles: Object.freeze(['owner']),
+  operatorRoles: Object.freeze(['dsh-admin']),
   houseSubject: 'house',
-}
+})
 
 /** Case-sensitive match of trimmed non-empty roles against a trimmed allow-list. */
 function hasAnyRole(roles: readonly string[], allowed: readonly string[]): boolean {
@@ -103,7 +107,10 @@ export function resolveTenantPolicy(
   // Own-property lookup only: a key like 'constructor' must read as unmapped,
   // never as an inherited non-string value that would throw.
   if (!Object.prototype.hasOwnProperty.call(mapping, tenantId)) return { ok: false, code: 'tenant-unmapped' }
-  const subject = (mapping[tenantId] ?? '').trim()
+  // A corrupt runtime value (e.g. a number) must degrade to the unmapped
+  // error, never throw on .trim(); blank/whitespace handling is unchanged.
+  const rawSubject: unknown = mapping[tenantId]
+  const subject = typeof rawSubject === 'string' ? rawSubject.trim() : ''
   if (subject.length === 0) return { ok: false, code: 'tenant-unmapped' }
   const houseSubject = (options?.houseSubject ?? DEFAULT_TENANT_POLICY_OPTIONS.houseSubject).trim()
   if (subject === houseSubject) return { ok: false, code: 'forbidden' }
@@ -117,12 +124,24 @@ export function resolveTenantPolicy(
   }
 }
 
-/** Guard a resolved policy on the tenant-manager role; otherwise forbidden. */
+/**
+ * Guard a resolved policy on the tenant-manager role. Passthrough preserves
+ * the original error (unauthenticated stays 401-mappable; tenant-unmapped
+ * stays 403-mappable); only an authenticated-but-insufficient-role policy
+ * becomes forbidden.
+ */
 export function requireTenantManager(policy: TenantPolicy | PolicyError): TenantPolicy | PolicyError {
-  return policy.ok && policy.isTenantManager ? policy : { ok: false, code: 'forbidden' }
+  if (!policy.ok) return policy
+  return policy.isTenantManager ? policy : { ok: false, code: 'forbidden' }
 }
 
-/** Guard a resolved policy on the operator role; otherwise forbidden. */
+/**
+ * Guard a resolved policy on the operator role. Passthrough preserves
+ * the original error (unauthenticated stays 401-mappable; tenant-unmapped
+ * stays 403-mappable); only an authenticated-but-insufficient-role policy
+ * becomes forbidden.
+ */
 export function requireOperator(policy: TenantPolicy | PolicyError): TenantPolicy | PolicyError {
-  return policy.ok && policy.isOperator ? policy : { ok: false, code: 'forbidden' }
+  if (!policy.ok) return policy
+  return policy.isOperator ? policy : { ok: false, code: 'forbidden' }
 }
