@@ -73,19 +73,20 @@ export type Disposer = () => void
  * Resolve the policy for one request from the verified identity ONLY. No
  * query, body, or header value other than what identityFromRequest itself
  * consumes ever reaches the resolver, so client data can never select a
- * tenant. An identity source that throws degrades to unauthenticated.
+ * tenant. Any throw across the seam — the identity source, the tenant
+ * subject mapping, or the policy resolution itself — degrades to
+ * unauthenticated.
  * @param req - the incoming request.
  * @param auth - the wired auth seam.
  * @returns the resolved policy, or a typed fail-closed error.
  */
 export async function resolveRequestPolicy(req: IncomingMessage, auth: RouteAuth): Promise<TenantPolicy | PolicyError> {
-  let identity: RouteIdentity | undefined
   try {
-    identity = await auth.identityFromRequest(req)
+    const identity = await auth.identityFromRequest(req)
+    return resolveTenantPolicy(identity, auth.tenantSubjects(), auth.policyOptions)
   } catch {
-    identity = undefined
+    return { ok: false, code: 'unauthenticated' }
   }
-  return resolveTenantPolicy(identity, auth.tenantSubjects(), auth.policyOptions)
 }
 
 /**
@@ -141,33 +142,41 @@ async function authorizeOperator(req: IncomingMessage, res: ServerResponse, deps
  */
 export function mountRoutes(webServer: WebServerLike, deps: RouteDeps): Disposer {
   const disposers: Disposer[] = []
-  const route = (path: string, handler: (req: IncomingMessage, res: ServerResponse) => void): void => {
-    disposers.push(webServer.register({ kind: 'exact', path, handler }))
+  /**
+   * Register one exact route. Async handler rejections are converted to a
+   * 500 JSON response instead of an unhandled rejection: a fire-and-forget
+   * promise inside the handler escapes the host's register() catch and
+   * hangs the socket. The writableEnded guard avoids double-writing when
+   * the response already ended (the host catch may also act).
+   * @param path - the exact path to mount.
+   * @param handler - the route handler; may return a promise.
+   */
+  const route = (path: string, handler: (req: IncomingMessage, res: ServerResponse) => unknown): void => {
+    disposers.push(webServer.register({
+      kind: 'exact',
+      path,
+      handler: (req, res) => {
+        try {
+          const outcome = handler(req, res)
+          if (outcome instanceof Promise) outcome.catch(() => writeInternal(res))
+        } catch {
+          writeInternal(res)
+        }
+      },
+    }))
   }
 
-  route('/api/openmeter/status', (req, res) => {
-    void handleStatus(req, res, deps)
-  })
+  route('/api/openmeter/status', (req, res) => handleStatus(req, res, deps))
 
-  route('/api/openmeter/usage', (req, res) => {
-    void handleUsage(req, res, deps)
-  })
+  route('/api/openmeter/usage', (req, res) => handleUsage(req, res, deps))
 
-  route('/api/openmeter/customers', (req, res) => {
-    void handleCustomers(req, res, deps)
-  })
+  route('/api/openmeter/customers', (req, res) => handleCustomers(req, res, deps))
 
-  route('/api/openmeter/grants', (req, res) => {
-    void handleGrant(req, res, deps)
-  })
+  route('/api/openmeter/grants', (req, res) => handleGrant(req, res, deps))
 
-  route('/api/openmeter/block', (req, res) => {
-    void handleBlock(req, res, deps)
-  })
+  route('/api/openmeter/block', (req, res) => handleBlock(req, res, deps))
 
-  route('/api/openmeter/bindings', (req, res) => {
-    void handleBindings(req, res, deps)
-  })
+  route('/api/openmeter/bindings', (req, res) => handleBindings(req, res, deps))
 
   return () => {
     for (const dispose of disposers.splice(0)) dispose()
@@ -319,6 +328,16 @@ async function handleBindings(req: IncomingMessage, res: ServerResponse, deps: R
   } catch (error) {
     writeJson(res, 500, { ok: false, error: describe(error) })
   }
+}
+
+/**
+ * Write the fail-closed 500 for a handler that threw or rejected; a no-op
+ * when the response already ended so the host catch may still act without
+ * a double-write.
+ * @param res - the response.
+ */
+function writeInternal(res: ServerResponse): void {
+  if (!res.writableEnded) writeJson(res, 500, { ok: false, error: 'internal' })
 }
 
 /**

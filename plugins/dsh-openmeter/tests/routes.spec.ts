@@ -278,6 +278,65 @@ describe('mountRoutes tenant policy gate', () => {
     expect(calls).toEqual([])
   })
 
+  it('degrades to 401 unauthenticated when the seam throws mid-resolution (fail closed)', async () => {
+    const server = fakeWebServer()
+    const auth: RouteAuth = {
+      available: () => true,
+      identityFromRequest: async () => ACME_MEMBER,
+      tenantSubjects: () => {
+        throw new Error('mapping store down')
+      },
+    }
+    const { deps, calls } = fakeDeps(auth)
+    mountRoutes(server.webServer, deps)
+    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/status')
+    expect(result.status).toBe(401)
+    expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'unauthenticated' })
+    expect(calls).toEqual([])
+  })
+
+  it('gates every mounted route: 401 with no identity, 403 for a mapped member', async () => {
+    const routeCases: Array<{ method: string, path: string, body?: string }> = [
+      { method: 'GET', path: '/api/openmeter/status' },
+      { method: 'GET', path: '/api/openmeter/usage' },
+      { method: 'GET', path: '/api/openmeter/customers' },
+      { method: 'POST', path: '/api/openmeter/grants', body: JSON.stringify({ customerKey: 'cust-acme', amount: 1 }) },
+      { method: 'POST', path: '/api/openmeter/block', body: JSON.stringify({ customerKey: 'cust-acme', blocked: true }) },
+      { method: 'GET', path: '/api/openmeter/bindings' },
+    ]
+    const identities: Array<{ label: string, seam: () => RouteAuth, status: number, error: string }> = [
+      { label: 'no identity', seam: () => authSeam({ subjects: SUBJECTS }), status: 401, error: 'unauthenticated' },
+      { label: 'mapped member acme/alice', seam: () => authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS }), status: 403, error: 'forbidden' },
+    ]
+    for (const expected of identities) {
+      for (const routeCase of routeCases) {
+        const label = `${expected.label} ${routeCase.method} ${routeCase.path}`
+        const server = fakeWebServer()
+        const { deps, calls } = fakeDeps(expected.seam())
+        mountRoutes(server.webServer, deps)
+        const result = await dispatch(server.handlers, routeCase.method, routeCase.path, routeCase.body)
+        expect(result.status, label).toBe(expected.status)
+        expect(JSON.parse(result.body), label).toEqual({ ok: false, error: expected.error })
+        expect(calls, label).toEqual([])
+      }
+    }
+  })
+
+  it('answers 500 internal when a handler collaborator throws instead of hanging', async () => {
+    const server = fakeWebServer()
+    const { deps, calls } = fakeDeps(authSeam({ identity: OPERATOR, subjects: SUBJECTS }))
+    deps.wal = {
+      stats: () => {
+        throw new Error('wal offline')
+      },
+    } as unknown as MeteringWal
+    mountRoutes(server.webServer, deps)
+    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/status')
+    expect(result.status).toBe(500)
+    expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'internal' })
+    expect(calls).toEqual([])
+  })
+
   it('disposes every registered route', () => {
     const server = fakeWebServer()
     const { deps } = fakeDeps()
