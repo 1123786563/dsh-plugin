@@ -234,11 +234,10 @@ var PluginAuthCasdoorServer = class extends import_server.Plugin {
           if (!name) ctx.throw(401, "Invalid login state payload.");
           const auth = await ctx.app.authManager.get(name, ctx);
           const { token } = await auth.signIn();
-          const origin = originOf(ctx);
-          const back = new URL("/signin", origin);
+          const back = new URL("/signin", "http://callback.invalid");
           back.searchParams.set("authenticator", name);
           back.searchParams.set("token", token);
-          ctx.redirect(back.toString());
+          ctx.redirect(back.pathname + back.search);
         }
       }
     });

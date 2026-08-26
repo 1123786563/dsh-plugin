@@ -10,7 +10,7 @@
 
 import { Plugin } from '@nocobase/server';
 import { authType } from '../constants';
-import { CasdoorAuth, originOf } from './casdoor-auth';
+import { CasdoorAuth } from './casdoor-auth';
 
 export class PluginAuthCasdoorServer extends Plugin {
   async load() {
@@ -44,11 +44,13 @@ export class PluginAuthCasdoorServer extends Plugin {
           if (!name) ctx.throw(401, 'Invalid login state payload.');
           const auth = (await ctx.app.authManager.get(name, ctx)) as CasdoorAuth;
           const { token } = await auth.signIn();
-          const origin = originOf(ctx);
-          const back = new URL('/signin', origin);
+          // Relative Location: the browser resolves it against the callback
+          // request's own origin, so the port/host the user actually reached
+          // NocoBase on is preserved behind any proxy or port mapping.
+          const back = new URL('/signin', 'http://callback.invalid');
           back.searchParams.set('authenticator', name);
           back.searchParams.set('token', token);
-          ctx.redirect(back.toString());
+          ctx.redirect(back.pathname + back.search);
         },
       },
     });
