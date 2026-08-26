@@ -2,12 +2,12 @@
 
 [English](README.md) | 中文
 
-面向 DeepSeek Harness 的租户隔离求职能力：候选人档案、可插拔门户抓取、匹配度排序、投递追踪、面试准备，以及会话头部的求职看板。
+面向 DeepSeek Harness 的租户隔离求职能力：候选人档案、可插拔门户抓取、匹配度排序、投递追踪、面试准备，以及左侧栏求职面板。
 
 ## 提供什么
 
 - **工具**（面向模型）：`job_search_setup` → `job_search_scrape` → `job_search_rank` → `job_search_apply` → `job_search_interview_prep` → `job_search_outcome`。生成类工具返回装配好的 brief（档案 + 职位 + 匹配分 + 写作指引），由会话中的模型据此撰写简历与求职信。
-- **看板**（浏览器）：会话头部的“求职看板”入口，读取只读路由 `/plugins/dsh-job-search/pipeline.json`——档案行、投递漏斗、最近职位与投递。租户管道有内容时才出现。
+- **看板**（浏览器）：左侧栏 🧭 "求职面板"（better-sidebar Tab），读取只读路由 `/plugins/dsh-job-search/pipeline.json`——档案行、投递漏斗、最近职位与投递。未安装 better-sidebar 时静默缺席。
 - **存储**：`job_search` 存储域（`profiles` / `jobs` / `applications`），以不透明的 `TenantId` 键控；所有查询按租户过滤，一个租户的数据不会到达另一个。要求 profile 已提供存储栈（`dsh-storage` + 后端 + `dsh-storage-domain`）——官方 web profile 已具备。
 
 ## 安装到 profile

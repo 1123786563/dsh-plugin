@@ -7,7 +7,7 @@ Tenant-isolated job search for DeepSeek Harness: a candidate profile, job scrapi
 ## What it adds
 
 - **Tools** (model-facing): `job_search_setup` → `job_search_scrape` → `job_search_rank` → `job_search_apply` → `job_search_interview_prep` → `job_search_outcome`. Generation tools return an assembled brief (profile + posting + fit + writing guidance); the model in the session writes the actual CV and cover letter from it.
-- **Dashboard** (browser): a session-header "求职看板" action over the read-only `/plugins/dsh-job-search/pipeline.json` route — profile line, application funnel, recent jobs and applications. Appears only once the tenant's pipeline carries content.
+- **Dashboard** (browser): a left-sidebar pipeline panel (better-sidebar 🧭 tab) over the read-only `/plugins/dsh-job-search/pipeline.json` route — profile line, application funnel, recent jobs and applications. Appears only once the tenant's pipeline carries content.
 - **Storage**: a `job_search` storage domain (`profiles` / `jobs` / `applications`) keyed by an opaque `TenantId`; every query filters by tenant, so one tenant's data never reaches another. Requires the profile to provide the storage stack (`dsh-storage` + a backend + `dsh-storage-domain`) — the shipped web profile does.
 
 ## Install into a profile

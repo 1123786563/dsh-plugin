@@ -1,7 +1,7 @@
 {
   "name": "dsh-job-search",
   "version": "0.1.0",
-  "description": "Tenant-isolated job search for DeepSeek Harness: candidate profile, portal scraping, fit ranking, application tracking, interview prep, and a session-header pipeline dashboard",
+  "description": "Tenant-isolated job search for DeepSeek Harness: candidate profile, portal scraping, fit ranking, application tracking, interview prep, and a left-sidebar pipeline panel (better-sidebar tab)",
   "type": "module",
   "license": "MIT",
   "keywords": [
