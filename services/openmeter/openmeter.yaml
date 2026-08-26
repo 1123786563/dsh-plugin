@@ -1,0 +1,51 @@
+# OpenMeter fork 配置 — 本地 dsh 计费栈（docker compose 网络内主机名）。
+# 从 fork 根目录 config.yaml（dsh-openmeter 插件的联调基准）翻译而来：
+# 地址换成 compose 服务名，去掉 WeKnora e2e 的 meters 与 commerce 支付段；
+# meter/feature/客户由插件 scripts/bootstrap.mjs 在运行期幂等创建。
+#
+# API 不设认证（auth.oidc 关闭），与插件默认空 token 一致；仅监听
+# compose 网络与 127.0.0.1:8888，不要暴露到公网。
+
+telemetry:
+  log:
+    level: info
+
+auth:
+  oidc:
+    enabled: false
+
+ingest:
+  kafka:
+    broker: kafka:9092
+    brokerAddressFamily: v4
+
+aggregation:
+  clickhouse:
+    address: clickhouse:9000
+
+sink:
+  minCommitCount: 1
+  namespaceRefetch: 5s
+  namespaceRefetchTimeout: 5s
+  kafka:
+    brokers: kafka:9092
+    brokerAddressFamily: v4
+  # 事件去重（配合插件 WAL 的至少一次投递；32 天窗口）
+  dedupe:
+    enabled: true
+    driver: redis
+    config:
+      address: redis:6379
+      database: 0
+      expiration: 768h
+
+postgres:
+  url: postgres://openmeter:openmeter@postgres:5432/openmeter?sslmode=disable
+  autoMigrate: migration
+
+# 客户/授予/余额（收银台充值与门禁余额查询）；dsh 不用 credit 预留，
+# reservationsEnabled 保持与 fork 基准一致即可
+credits:
+  enabled: true
+  enableCreditThenInvoice: false
+  reservationsEnabled: true

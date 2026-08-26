@@ -17,6 +17,23 @@ DeepSeek Harness（DSH）插件集合 monorepo。每个子目录 `plugins/<name>
 | 目录 | 说明 |
 | --- | --- |
 | `services/casdoor-gateway` | Casdoor 认证网关：持有公口，OIDC 登录（授权码+PKCE）、SQLite 登录会话、特权方法角色门禁、HTTP/WebSocket 全量转发到 loopback 私口上的 dsh webserver |
+| `services/higress-gateway` | Higress AI 网关本地部署模板：官方一键安装封装（env 驱动端口）+ 冒烟脚本；配套 `plugins/dsh-higress` |
+| `services/openmeter` | 根 compose 里 OpenMeter fork 栈的配置（`openmeter.yaml`）与 Postgres 初始化 SQL；配套 `plugins/dsh-openmeter` |
+
+## 本地外部服务（docker compose）
+
+所有容器化外部依赖集中在根目录 `docker-compose.yml`，仓库根一条命令拉起：
+
+```sh
+docker compose up -d        # casdoor（认证 IdP）+ OpenMeter fork 栈（计费）
+```
+
+| 服务 | 宿主端口 | 服务的插件 |
+| --- | --- | --- |
+| casdoor | `127.0.0.1:8001` | dsh-casdoor-auth / services/casdoor-gateway |
+| openmeter（fork 全栈：kafka/clickhouse/postgres/redis + server/sink/balance/billing） | `127.0.0.1:8888`（插件默认 endpoint） | dsh-openmeter |
+
+openmeter 镜像从同级 `../openmeter` 检出构建（fork 的 v3 API 是插件必需），可用 `OPENMETER_SRC_DIR` 覆盖路径。有意不并入：higress（官方安装脚本自管容器，走 `services/higress-gateway/install.sh`）、Plane（`dsh-plane` 面向 Plane Cloud 或既有自托管实例）。
 
 ## 安装某个插件到 dsh profile
 

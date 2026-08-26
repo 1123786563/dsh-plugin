@@ -1,0 +1,193 @@
+# ============================================================================
+# dsh-plugin — 本地外部服务统一入口（一条命令拉起全部依赖）
+# ============================================================================
+#   docker compose up -d              # 全量：casdoor + openmeter 计费栈
+#   docker compose up -d casdoor      # 只起认证 IdP
+#   docker compose logs -f openmeter  # 看某个服务日志
+#   docker compose down               # 停止（数据卷保留）
+#
+# 端口（全部只绑 loopback）：
+#   casdoor    127.0.0.1:8001   认证 IdP（宿主 8000 常被占用，见 casdoor-gateway README）
+#   openmeter  127.0.0.1:8888   计费 API（dsh-openmeter 插件的默认 endpoint）
+#   kafka / clickhouse / postgres / redis 不映射宿主端口，仅在 compose 网络内互通
+#
+# 不在本文件里（有意为之）：
+#   * higress — 官方安装脚本自管容器生命周期，走 services/higress-gateway/install.sh
+#   * plane   — dsh-plane 面向 Plane Cloud 或既有自托管实例，无本地依赖
+#
+# casdoor 首次启动（数据卷为空时）读取 init_data.json 种子；重新播种需
+# `docker compose down -v && docker compose up -d casdoor`。
+#
+# openmeter 镜像从源码构建（fork 的 v3 API 是 dsh-openmeter 必需，官方镜像没有）：
+# 源码取 /Users/wuyongjun/trea/openmeter（默认值 ../openmeter 相对仓库根解析，
+# 可用 OPENMETER_SRC_DIR 覆盖），构建包含其工作区当前状态（Dockerfile.local 的
+# COPY . . 会带上未提交改动）。首次构建需数分钟；fork 源码更新后需显式重建：
+#   docker compose build openmeter && docker compose up -d
+name: dsh
+
+x-openmeter-common: &openmeter-common
+  image: dsh-openmeter:local
+  build:
+    context: ${OPENMETER_SRC_DIR:-../openmeter}
+    dockerfile: Dockerfile.local
+  restart: unless-stopped
+  volumes:
+    - ./services/openmeter/openmeter.yaml:/etc/openmeter/config.yaml:ro
+
+services:
+  # ---- 认证：Casdoor IdP（casdoor-gateway + dsh-casdoor-auth 的依赖）-------
+  casdoor:
+    image: ${CASDOOR_IMAGE:-casbin/casdoor:latest}
+    container_name: dsh-casdoor
+    restart: unless-stopped
+    ports:
+      # 宿主 8001 → 容器内 8000（casdoor 自身监听 8000 不变）
+      - "127.0.0.1:8001:8000"
+    environment:
+      RUNNING_IN_DOCKER: "true"
+    volumes:
+      - casdoor-data:/conf
+      - ./services/casdoor-gateway/docker/app.ini:/conf/app.conf:ro
+      - ./services/casdoor-gateway/docker/init_data.json:/init_data.json:ro
+
+  # ---- 计费：OpenMeter fork 栈（dsh-openmeter 插件的依赖）------------------
+  kafka:
+    image: confluentinc/cp-kafka:8.0.3
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: dsh-openmeter-kraft
+      KAFKA_BROKER_ID: 0
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "0@kafka:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092
+      KAFKA_LISTENERS: INTERNAL://kafka:9092,CONTROLLER://kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      # meter 由 bootstrap.mjs 在运行期通过 API 创建，topic 随建随有
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - om-kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12.3-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: default
+      CLICKHOUSE_DB: openmeter
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - om-ch-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://clickhouse:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4.7
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "50mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - om-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  postgres:
+    image: postgres:14.20-alpine3.23
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - om-pg-data:/var/lib/postgresql/data
+      - ./services/openmeter/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  openmeter:
+    <<: *openmeter-common
+    command: openmeter --address 0.0.0.0:8888 --config /etc/openmeter/config.yaml
+    depends_on:
+      kafka: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:8888:8888"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8888/api/v1/debug/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+
+  openmeter-sink:
+    <<: *openmeter-common
+    command: openmeter-sink-worker --config /etc/openmeter/config.yaml
+    depends_on:
+      kafka: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      openmeter: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:10000/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  openmeter-balance:
+    # 余额扣减必需（收银台/门禁读的是 balance-worker 维护的余额）
+    <<: *openmeter-common
+    command: openmeter-balance-worker --config /etc/openmeter/config.yaml
+    depends_on:
+      kafka: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      openmeter: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:10000/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  openmeter-billing:
+    <<: *openmeter-common
+    command: openmeter-billing-worker --config /etc/openmeter/config.yaml
+    depends_on:
+      kafka: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+      openmeter: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:10000/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  casdoor-data:
+  om-pg-data:
+  om-kafka-data:
+  om-ch-data:
+  om-redis-data:

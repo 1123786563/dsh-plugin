@@ -6,7 +6,7 @@
 
 ```bash
 # 1. casdoor（官方镜像；固定版本用 CASDOOR_IMAGE=casbin/casdoor:vX.Y.Z）
-cd docker && docker compose up -d          # 首启读取 init_data.json 种子；宿主端口 8001
+docker compose up -d casdoor              # 仓库根目录（统一 compose，见根 README）；首启读取 init_data.json 种子；宿主端口 8001
 
 # 2. 网关
 cp .env.example .env                        # 填 CASDOOR_CLIENT_SECRET（与 init_data.json 一致）

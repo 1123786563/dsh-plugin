@@ -21,7 +21,14 @@ OpenMeter 计费插件 for DeepSeek Harness：把每次 LLM 模型调用的 toke
 
 ### 1. 启动 OpenMeter fork（自托管）
 
-基础设施（Kafka/ClickHouse/Postgres/Redis）按 fork 的 `docker-compose.base.yaml` 或既有远程实例；应用层从源码构建：
+推荐：仓库根目录的统一 compose（`docker-compose.yml`，含 Kafka/ClickHouse/Postgres/Redis 与 server/sink/balance/billing 四进程；镜像从同级 `../openmeter` 检出用 `Dockerfile.local` 构建，配置见 `services/openmeter/`；API 宿主端口 `127.0.0.1:8888` 即插件默认 endpoint）：
+
+```sh
+cd /Users/wuyongjun/trea/dsh-plugin
+docker compose up -d        # 首次构建镜像需数分钟；只起计费栈：… up -d openmeter openmeter-sink openmeter-balance openmeter-billing
+```
+
+备选：宿主进程直跑（自备 Kafka/ClickHouse/Postgres/Redis，参考 fork 根 `config.yaml`）：
 
 ```sh
 cd /path/to/openmeter
@@ -37,7 +44,7 @@ TELEMETRY_ADDRESS=:10003 ./build/billing-worker --config config.yaml
 TELEMETRY_ADDRESS=:10004 ./build/notification-service --config config.yaml
 ```
 
-注：各进程遥测端口必须互不相同（`:10000` 被 server 占用）。
+注：宿主直跑时各进程遥测端口必须互不相同（`:10000` 被 server 占用）；compose 里各容器网络命名空间独立，无此约束。
 
 ### 2. 引导（幂等）
 
