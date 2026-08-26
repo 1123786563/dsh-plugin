@@ -1,0 +1,31 @@
+{
+  "name": "dsh-casdoor-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Casdoor authentication gateway fronting DeepSeek Harness: OIDC authorization-code login (PKCE), server-side SQLite login sessions, an Ed25519 DshIdentityToken minted per request, a privileged-method role gate, and a full-coverage HTTP/WebSocket reverse proxy into the loopback-only dsh webserver.",
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node lib/server.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "fastify": "^5.4.0",
+    "jose": "^6.1.0",
+    "openid-client": "^6.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "tsx": "^4.22.4",
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.8"
+  }
+}

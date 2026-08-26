@@ -77,12 +77,20 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
   const estimator = new PriceEstimator(() => client, () => current.quoteCurrency)
   const gate = new BalanceGate(() => client, store, getConfig)
   const forwarder = new Forwarder(wal, () => client, getConfig)
+  // Reading `ctx.sessions` directly throws "cannot get property ... without
+  // inject" in this fiber; the scoped inject below is the sanctioned access
+  // and keeps the service optional (metering falls back to the house subject).
+  let sessions: SessionsLike | undefined
+  ctx.effect(() => ctx.inject(['sessions'], scoped => {
+    sessions = (scoped as unknown as { sessions: SessionsLike }).sessions
+    return () => { sessions = undefined }
+  }))
   const pipeline = new MeteringPipeline({
     wal,
     gate,
     estimator,
     getConfig,
-    sessions: () => (ctx as unknown as { sessions?: SessionsLike }).sessions,
+    sessions: () => sessions,
     presetSubject: presetId => store.subjectFor(presetId, current.houseSubject),
     observePreset: presetId => store.observePreset(presetId),
   })
