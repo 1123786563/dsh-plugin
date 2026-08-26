@@ -1,0 +1,73 @@
+# dsh-casdoor-auth — DSH 的 Casdoor 登录门禁插件
+
+把 [casdoor](https://github.com/casdoor/casdoor) 登录接到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）：**所有到达 dsh 的请求必经 casdoor 认证，未登录跳转登录页，满足 SaaS 多租户**。
+
+本插件是两件套的 dsh 侧一半，与独立网关服务 [services/casdoor-gateway](../../services/casdoor-gateway) 配套使用：
+
+```
+浏览器 ──► casdoor-gateway :3080 ──转发──► dsh webserver 127.0.0.1:38080（私口）
+              │  OIDC 授权码+PKCE → casdoor :8001
+              │  登录会话(HttpOnly cookie + SQLite) / 特权方法角色门禁
+              └─ 每请求铸造 DshIdentityToken(Ed25519 JWT) → 本插件验签 → ctx.casdoorAuth
+                                                    → 装配 dsh-multi-tenant（Agent 层租户隔离）
+```
+
+## 职责
+
+- **`ctx.casdoorAuth`**：验证网关转发的 DshIdentityToken（JWKS 验签、iss/aud/算法校验），物化 `{tenantId, userId, displayName, roles}`；
+- **401 登出监视器**：通过 `webServer.tapIndex` 注入极小脚本进 SPA shell——登录会话中途过期时，首个同源 401 自动跳 `/login`（无 client 半区依赖，覆盖一切插件的 fetch）；
+- **dsh-multi-tenant 装配**：以已验证身份为其 `identity` 接缝供 TenantPrincipal，挂载 `/_dsh-multi-tenant` Web 桥（identity / agents/create / agents/resume），MCP 服务器与 Principal 凭据从插件配置读取（v1：静态，见配置）。
+
+## 安装（与网关配套）
+
+```bash
+# 1. 起 casdoor（首启种子数据：orgs acme/globex、用户、dsh-gateway 应用）
+cd services/casdoor-gateway/docker && docker compose up -d
+
+# 2. 起网关（.env 参考 ../.env.example，clientSecret 与 init_data.json 一致）
+cd services/casdoor-gateway && pnpm dev
+
+# 3. 安装插件与 multi-tenant 到 dsh web profile
+cd <deepseek-harness 检出>
+pnpm dsh plugin --profile web add link:/Users/wuyongjun/trea/dsh-plugin/plugins/dsh-casdoor-auth
+pnpm dsh plugin --profile web add link:/Users/wuyongjun/trea/dsh-plugin/plugins/dsh-multi-tenant/packages/multi-tenant
+pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
+
+# 4. 浏览器访问 http://127.0.0.1:3080/login?org=acme（多组织入口：/login?org=<casdoor组织名>；不带 org 走应用默认组织）
+```
+
+种子账号：`acme/alice`（密码 `alice-Acme1`）、`globex/bob`（`bob-Globex1`）、`dsh-ops/dsh-admin`（`dsh-Admin1`，特权角色 `dsh-admin`）。
+
+## 配置
+
+设置卡（Settings → Plugins → casdoor-auth）或 profile 补丁均可覆盖；环境变量默认值由 bundle patch 注入：
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `gatewayJwksUrl` | `http://127.0.0.1:3080/.well-known/jwks.json` | 网关 JWKS（公钥公开） |
+| `identityHeader` | `x-dsh-identity` | DshIdentityToken 携带头 |
+| `issuer` / `audience` | `dsh-casdoor-gateway` / `dsh-casdoor-auth` | 令牌校验目标 |
+| `basePath` | `/_dsh-multi-tenant` | Web 桥挂载路径 |
+| `mcpServers` / `mcpServersByTenant` | `[]` / `{}` | 租户 MCP 服务器（stdio/streamable-http），per-tenant 覆盖全局 |
+| `credentials` | `{}` | Principal 静态凭据（name→secret），MCP 凭据绑定解析用 |
+
+端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`。
+
+## 已知边界
+
+- **stock Web UI 无租户隔离**（上游 [issue #41](https://github.com/GuoMonth/dsh-multi-tenant/issues/41)）：登录后是共享工作区；租户隔离发生在 Agent 层（会话归属 claim-once + Principal 绑定）。
+- 本机进程可直连 `38080` 绕过网关（loopback 内信任边界）。
+- 特权方法（settings/credentials/agentPreset 等 15 个）在网关层要求 casdoor 角色 `dsh-admin`。
+
+## 文档
+
+- 领域术语表：[CONTEXT.md](./CONTEXT.md)
+- 架构决策：[docs/adr/0001](./docs/adr/0001-standalone-gateway-form.md)（独立网关形态）、[0002](./docs/adr/0002-gateway-signed-identity-jwt.md)（JWT 身份传递与特权门禁）、[0003](./docs/adr/0003-fastify-openid-client-stack.md)（网关技术栈与请求体缓冲）
+
+## 开发
+
+```bash
+pnpm build      # tsc -b && tsdown（jose 打包进产物；cordis/schemastery/dsh-multi-tenant 外部化）
+pnpm test       # vitest：身份验签矩阵 / 配置与 MCP 映射 / watcher 注入 / 清单
+pnpm typecheck
+```

@@ -6,3 +6,5 @@ coverage/
 
 .worktrees/
 .mimosa/
+.env
+.playwright-mcp/

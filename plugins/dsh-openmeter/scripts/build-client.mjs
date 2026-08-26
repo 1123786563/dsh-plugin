@@ -26,8 +26,8 @@ const result = await build({
   outfile: 'client.js',
   legalComments: 'none',
   // Only shell-seeded baseline externals: React and its jsx runtime. Every
-  // service the plugin uses (slots, locale, settingsScope, betterSidebar)
-  // arrives through cordis injection, never through a module require.
+  // service the plugin uses (slots, locale, settingsScope) arrives through
+  // cordis injection, never through a module require.
   external: ['react', 'react/jsx-runtime'],
   write: false,
   logLevel: 'info',

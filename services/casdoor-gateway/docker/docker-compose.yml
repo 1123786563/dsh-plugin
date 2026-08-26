@@ -1,0 +1,26 @@
+# Casdoor dev deployment for the dsh-casdoor gateway (Q7: official image,
+# pinned via env; local source checkout stays reference-only).
+#
+#   CASDOOR_IMAGE=casbin/casdoor:vX.Y.Z docker compose up -d
+#
+# sqlite keeps the footprint at one container; the named volume persists
+# casdoor.db across restarts. init_data.json is read on FIRST boot only
+# (empty database) — to re-seed, `docker compose down -v` first.
+services:
+  casdoor:
+    image: ${CASDOOR_IMAGE:-casbin/casdoor:latest}
+    container_name: dsh-casdoor
+    restart: unless-stopped
+    ports:
+      # 8001 host-side: 8000 is a commonly squatted dev port (and was on this
+      # machine); casdoor itself keeps listening on 8000 inside the container.
+      - "127.0.0.1:8001:8000"
+    environment:
+      RUNNING_IN_DOCKER: "true"
+    volumes:
+      - casdoor-data:/conf
+      - ./app.ini:/conf/app.conf:ro
+      - ./init_data.json:/init_data.json:ro
+
+volumes:
+  casdoor-data:

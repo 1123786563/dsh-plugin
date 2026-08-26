@@ -1,6 +1,6 @@
 # dsh-plugin
 
-DeepSeek Harness（DSH）插件集合 monorepo。每个子目录 `plugins/<name>` 是一个独立的可发布插件包（声明 `dsh.bundle`，部分还带 `dsh.client` 浏览器半区）。
+DeepSeek Harness（DSH）插件集合 monorepo。每个子目录 `plugins/<name>` 是一个独立的可发布插件包（声明 `dsh.bundle`，部分还带 `dsh.client` 浏览器半区）；`services/` 下是与插件配套的独立服务。
 
 ## 插件
 
@@ -10,6 +10,13 @@ DeepSeek Harness（DSH）插件集合 monorepo。每个子目录 `plugins/<name>
 | `plugins/dsh-job-search` | 租户隔离求职：`job_search_*` 工具族（建档/抓取/排序/投递/面试/结果）+ 会话头部"求职看板" |
 | `plugins/dsh-open-design` | OpenDesign 设计引擎技能目录：以 `open-design` 提供者向宿主技能注册表注册 77 个设计技能 + 152 个品牌级设计系统 + 固定幻灯片框架（来自 nexu-io/open-design，Apache-2.0） |
 | `plugins/dsh-openmeter` | OpenMeter 计费：LLM 调用逐条计量（WAL 至少一次投递）→ 自托管 fork；预付余额耗尽硬阻断（故障放行）；llm-cost 价格库 CNY 报价 + 即时估算；侧边栏用量面板 + 收银台（客户/充值/阻断/预设绑定） |
+| `plugins/dsh-casdoor-auth` | Casdoor 登录门禁（dsh 侧半区）：验证网关 DshIdentityToken → `ctx.casdoorAuth`，SPA 401 登出监视器，装配 dsh-multi-tenant Agent 层租户隔离。与 `services/casdoor-gateway` 配套 |
+
+## 配套服务
+
+| 目录 | 说明 |
+| --- | --- |
+| `services/casdoor-gateway` | Casdoor 认证网关：持有公口，OIDC 登录（授权码+PKCE）、SQLite 登录会话、特权方法角色门禁、HTTP/WebSocket 全量转发到 loopback 私口上的 dsh webserver |
 
 ## 安装某个插件到 dsh profile
 
@@ -24,7 +31,7 @@ pnpm dsh plugin --profile web add link:/Users/wuyongjun/trea/dsh-plugin/plugins/
 
 ```sh
 pnpm install
-pnpm test         # 所有插件
+pnpm test         # 所有插件与服务
 pnpm typecheck
 pnpm build
 ```

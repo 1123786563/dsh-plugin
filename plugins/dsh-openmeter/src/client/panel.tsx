@@ -1,14 +1,15 @@
 /**
- * The billing sidebar panel: two views over the host routes — 用量 (month
- * aggregates + recent per-call rows, each row = one committed assistant
- * message with its estimate) and 收银台 (customers, balances, recharge,
- * block/unblock, preset bindings). Owns its chrome; plain fetch on mount and
- * on manual refresh.
+ * The billing settings section (a top-level Settings page): three views over
+ * the host routes — 用量 (month aggregates + recent per-call rows, each row =
+ * one committed assistant message with its estimate), 收银台 (customers,
+ * balances, recharge, block/unblock, preset bindings), and 设置 (the config
+ * card, when provided). Owns its chrome; plain fetch on mount and on manual
+ * refresh.
  *
  * @module dsh-openmeter/client/panel
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { api } from './api.ts'
 import type { BindingsPayload, CustomersPayload, StatusPayload, UsagePayload } from './api.ts'
@@ -28,18 +29,23 @@ interface PanelState {
 }
 
 /**
- * Render the billing panel.
- * @param props - { t? } the locale seat.
- * @returns the panel.
+ * Render the billing settings section.
+ * @param props - { t?, config? } the locale seat and the optional config card.
+ * @returns the section.
  */
-export function BillingPanel(props: { t?: T } = {}): ReactNode {
-  const t = (key: string, params?: Record<string, string | number>): string => {
+export function BillingPanel(props: { t?: T, config?: ReactNode } = {}): ReactNode {
+  // The seated translator may arrive as a fresh prop identity every render,
+  // and `t` feeds the reload effect's useCallback — keep both stable so the
+  // mount effect doesn't loop fetch → setState → render forever.
+  const seatedRef = useRef(props.t)
+  seatedRef.current = props.t
+  const t = useCallback((key: string, params?: Record<string, string | number>): string => {
     const dict = dictionary() as Record<string, string>
-    const seated = props.t
+    const seated = seatedRef.current
     const raw = seated !== undefined ? seated(key, params) : dict[key] ?? key
     return params === undefined ? raw : format(raw, params)
-  }
-  const [view, setView] = useState<'usage' | 'cashier'>('usage')
+  }, [])
+  const [view, setView] = useState<'usage' | 'cashier' | 'config'>('usage')
   const [state, setState] = useState<PanelState>({ status: undefined, usage: undefined, customers: undefined, bindings: undefined, error: undefined, busy: false })
 
   const reload = useCallback(async (): Promise<void> => {
@@ -64,9 +70,14 @@ export function BillingPanel(props: { t?: T } = {}): ReactNode {
   const pending = state.status?.wal.pending
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12, padding: '4px 2px' }}>
+      <h2 style={pageStyle}>{t('card.title')}</h2>
+      <p style={introStyle}>{t('card.description')}</p>
       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
         <button type="button" style={view === 'usage' ? tabActiveStyle : tabStyle} onClick={() => { setView('usage') }}>{t('panel.usage')}</button>
         <button type="button" style={view === 'cashier' ? tabActiveStyle : tabStyle} onClick={() => { setView('cashier') }}>{t('panel.cashier')}</button>
+        {props.config !== undefined && (
+          <button type="button" style={view === 'config' ? tabActiveStyle : tabStyle} onClick={() => { setView('config') }}>{t('panel.settings')}</button>
+        )}
         <span style={{ flex: 1 }} />
         {state.status !== undefined && (
           <span style={pending !== undefined && pending > 0 ? warnStyle : mutedStyle}>
@@ -76,7 +87,7 @@ export function BillingPanel(props: { t?: T } = {}): ReactNode {
         <button type="button" style={buttonStyle} disabled={state.busy} onClick={() => { void reload() }}>{t('panel.refresh')}</button>
       </div>
       {state.error !== undefined && <p style={warnStyle}>{state.error}</p>}
-      {view === 'usage' ? <UsageView state={state} t={t} /> : <CashierView state={state} t={t} reload={reload} />}
+      {view === 'config' ? props.config : view === 'usage' ? <UsageView state={state} t={t} /> : <CashierView state={state} t={t} reload={reload} />}
     </div>
   )
 }
@@ -234,6 +245,8 @@ function CashierView(props: { state: PanelState, t: T, reload: () => Promise<voi
   )
 }
 
+const pageStyle: CSSProperties = { margin: 0, fontSize: 16 }
+const introStyle: CSSProperties = { margin: 0, opacity: 0.7 }
 const tabStyle: CSSProperties = { padding: '3px 10px', border: '1px solid rgba(127,127,127,.35)', borderRadius: 6, background: 'transparent', cursor: 'pointer' }
 const tabActiveStyle: CSSProperties = { ...tabStyle, fontWeight: 600, borderColor: 'rgba(127,127,127,.8)' }
 const buttonStyle: CSSProperties = { padding: '2px 8px', border: '1px solid rgba(127,127,127,.35)', borderRadius: 6, background: 'transparent', cursor: 'pointer', fontSize: 12 }

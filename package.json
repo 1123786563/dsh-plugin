@@ -8,9 +8,9 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "pnpm -r --filter './plugins/*' run build",
-    "test": "pnpm -r --filter './plugins/*' run test",
-    "typecheck": "pnpm -r --filter './plugins/*' run typecheck"
+    "build": "pnpm -r --filter './plugins/*' --filter './services/*' run build",
+    "test": "pnpm -r --filter './plugins/*' --filter './services/*' run test",
+    "typecheck": "pnpm -r --filter './plugins/*' --filter './services/*' run typecheck"
   }
 }
 

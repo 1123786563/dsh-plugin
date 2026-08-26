@@ -1,0 +1,27 @@
+# dsh-casdoor-auth bundle layer.
+#
+# Two effects when this package is listed in dsh.profile.bundles:
+#
+# 1. The dsh webserver moves to a loopback-only private port — the
+#    dsh-casdoor-gateway service owns the public port and proxies into it
+#    (HTTP + WebSocket), so every request passes the casdoor login gate.
+#    Layer order matters: this bundle must come after the web-app bundle
+#    (`dsh plugin add` appends to the end, which satisfies it). A patch that
+#    matches nothing (headless profile) warns and is skipped.
+# 2. The casdoor-auth plugin activates with env-driven defaults.
+#
+# The webserver config schema is exactly {host, port}; replacing it wholesale
+# is lossless. Override the port pair here and GATEWAY DSH_UPSTREAM_URL
+# together when 38080 is taken.
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: !!js process.env.DSH_CASDOOR_DSH_PORT ?? 38080
+
+- insert:
+    - id: casdoor-auth
+      name: dsh-casdoor-auth
+      config:
+        # Where the dsh process fetches the gateway's public signing keys.
+        gatewayJwksUrl: !!js process.env.DSH_CASDOOR_GATEWAY_JWKS_URL ?? 'http://127.0.0.1:3080/.well-known/jwks.json'
+        identityHeader: !!js process.env.DSH_CASDOOR_IDENTITY_HEADER ?? 'x-dsh-identity'

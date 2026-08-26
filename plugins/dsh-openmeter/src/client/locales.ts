@@ -7,7 +7,7 @@
 
 /** zh-CN dictionary. */
 export const zh: Record<string, string> = {
-  'tab.title': '计费',
+  'nav.title': '计费',
   'card.title': 'OpenMeter 计费',
   'card.description': '把每次模型调用的用量上报到自托管 OpenMeter：余额不足自动阻断（故障放行），价格取自 llm-cost 价格库。',
   'card.notExposed': '设置命名空间未暴露给当前客户端。',
@@ -30,6 +30,7 @@ export const zh: Record<string, string> = {
   'panel.refresh': '刷新',
   'panel.usage': '用量',
   'panel.cashier': '收银台',
+  'panel.settings': '设置',
   'panel.today': '本月累计（按客户）',
   'panel.recent': '最近调用',
   'panel.unpriced': '未定价',
@@ -63,7 +64,7 @@ export const zh: Record<string, string> = {
 
 /** en dictionary. */
 export const en: Record<string, string> = {
-  'tab.title': 'Billing',
+  'nav.title': 'Billing',
   'card.title': 'OpenMeter Billing',
   'card.description': 'Meter every model call into your self-hosted OpenMeter: hard-block on exhausted balance (fail-open), prices from the llm-cost catalog.',
   'card.notExposed': 'Settings namespace not exposed to this client.',
@@ -86,6 +87,7 @@ export const en: Record<string, string> = {
   'panel.refresh': 'Refresh',
   'panel.usage': 'Usage',
   'panel.cashier': 'Cashier',
+  'panel.settings': 'Settings',
   'panel.today': 'Month to date (by customer)',
   'panel.recent': 'Recent calls',
   'panel.unpriced': 'unpriced',

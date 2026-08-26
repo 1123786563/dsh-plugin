@@ -1,0 +1,186 @@
+{
+  "organizations": [
+    {
+      "owner": "admin",
+      "name": "acme",
+      "displayName": "Acme (demo tenant 1)",
+      "websiteUrl": "https://acme.example.com",
+      "passwordType": "bcrypt",
+      "passwordOptions": ["AtLeast6"],
+      "countryCodes": ["CN", "US"],
+      "defaultAvatar": "",
+      "defaultApplication": "dsh-gateway",
+      "defaultTokenFormat": "JWT",
+      "tags": [],
+      "languages": ["zh", "en"],
+      "masterPassword": "",
+      "enableSoftDeletion": false,
+      "isProfilePublic": false,
+      "accountItems": []
+    },
+    {
+      "owner": "admin",
+      "name": "dsh-ops",
+      "displayName": "DSH Platform Ops (gateway admins)",
+      "websiteUrl": "",
+      "passwordType": "bcrypt",
+      "passwordOptions": ["AtLeast6"],
+      "countryCodes": ["CN", "US"],
+      "defaultAvatar": "",
+      "defaultApplication": "dsh-gateway",
+      "defaultTokenFormat": "JWT",
+      "tags": [],
+      "languages": ["zh", "en"],
+      "masterPassword": "",
+      "enableSoftDeletion": false,
+      "isProfilePublic": false,
+      "accountItems": []
+    },
+    {
+      "owner": "admin",
+      "name": "globex",
+      "displayName": "Globex (demo tenant 2)",
+      "websiteUrl": "https://globex.example.com",
+      "passwordType": "bcrypt",
+      "passwordOptions": ["AtLeast6"],
+      "countryCodes": ["CN", "US"],
+      "defaultAvatar": "",
+      "defaultApplication": "dsh-gateway",
+      "defaultTokenFormat": "JWT",
+      "tags": [],
+      "languages": ["zh", "en"],
+      "masterPassword": "",
+      "enableSoftDeletion": false,
+      "isProfilePublic": false,
+      "accountItems": []
+    }
+  ],
+  "roles": [
+    {
+      "owner": "dsh-ops",
+      "name": "dsh-admin",
+      "displayName": "DSH Gateway Administrator",
+      "description": "Holders pass the gateway's privileged-method gate (settings/credentials/agentPreset RPC).",
+      "users": ["dsh-ops/dsh-admin"],
+      "domains": [],
+      "permissions": []
+    }
+  ],
+  "users": [
+    {
+      "owner": "acme",
+      "name": "alice",
+      "displayName": "Alice (Acme)",
+      "type": "normal-user",
+      "password": "alice-Acme1",
+      "email": "alice@acme.example.com",
+      "phone": "",
+      "countryCode": "CN",
+      "language": "zh",
+      "tags": [],
+      "roles": [],
+      "isAdmin": false,
+      "isGlobalAdmin": false,
+      "isForbidden": false,
+      "signupApplication": "dsh-gateway",
+      "hash": "",
+      "preHash": ""
+    },
+    {
+      "owner": "globex",
+      "name": "bob",
+      "displayName": "Bob (Globex)",
+      "type": "normal-user",
+      "password": "bob-Globex1",
+      "email": "bob@globex.example.com",
+      "phone": "",
+      "countryCode": "CN",
+      "language": "zh",
+      "tags": [],
+      "roles": [],
+      "isAdmin": false,
+      "isGlobalAdmin": false,
+      "isForbidden": false,
+      "signupApplication": "dsh-gateway",
+      "hash": "",
+      "preHash": ""
+    },
+    {
+      "owner": "dsh-ops",
+      "name": "dsh-admin",
+      "displayName": "DSH Admin",
+      "type": "normal-user",
+      "password": "dsh-Admin1",
+      "email": "dsh-admin@example.com",
+      "phone": "",
+      "countryCode": "CN",
+      "language": "zh",
+      "tags": [],
+      "roles": [
+        {
+          "owner": "dsh-ops",
+          "name": "dsh-admin"
+        }
+      ],
+      "isAdmin": false,
+      "isGlobalAdmin": false,
+      "isForbidden": false,
+      "signupApplication": "dsh-gateway",
+      "hash": "",
+      "preHash": ""
+    }
+  ],
+  "applications": [
+    {
+      "owner": "admin",
+      "name": "dsh-gateway",
+      "displayName": "DSH Gateway",
+      "logo": "https://cdn.casbin.org/img/casdoor-logo_1185x256.png",
+      "homepageUrl": "http://127.0.0.1:3080",
+      "description": "DeepSeek Harness login (authorization code + PKCE)",
+      "organization": "built-in",
+      "isShared": true,
+      "orgChoiceMode": "Select",
+      "clientId": "dsh-gateway",
+      "clientSecret": "change-me-64-hex",
+      "cert": "cert-dsh-gateway",
+      "enablePassword": true,
+      "enableSignUp": false,
+      "enableSigninSession": true,
+      "enableAutoSignin": false,
+      "enableCodeSignin": false,
+      "enableSamlCompress": false,
+      "enableWebAuthn": false,
+      "enableLinkWithEmail": false,
+      "redirectUris": [
+        "http://127.0.0.1:3080/casdoor/callback",
+        "http://127.0.0.1:3099/casdoor/callback"
+      ],
+      "tokenFormat": "JWT",
+      "tokenSigningMethod": "RS256",
+      "expireInHours": 168,
+      "signupFields": [],
+      "signinMethods": [
+        {
+          "name": "Password",
+          "rule": "All"
+        }
+      ],
+      "providers": []
+    }
+  ],
+  "certs": [
+    {
+      "owner": "built-in",
+      "name": "cert-dsh-gateway",
+      "displayName": "dsh-gateway token cert",
+      "scope": "JWT",
+      "type": "x509",
+      "cryptoAlgorithm": "RS256",
+      "bitSize": 4096,
+      "expireInYears": 20,
+      "publicKey": "",
+      "privateKey": ""
+    }
+  ]
+}

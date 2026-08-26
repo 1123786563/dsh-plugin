@@ -1,8 +1,8 @@
 /**
- * dsh-openmeter, browser half: the settings card (Settings > Plugins, the
- * openmeter namespace the Host registers) and the billing sidebar panel
- * (better-sidebar tab reading the Host's /api/openmeter routes — the token
- * never reaches the browser).
+ * dsh-openmeter, browser half: one top-level Settings section — 计费 — with
+ * three views over the Host's /api/openmeter routes (the token never reaches
+ * the browser): 用量, 收银台, and 设置 (the staged config card bound to the
+ * openmeter namespace the Host registers).
  *
  * Failure policy: mounting problems are logged, never thrown — the web shell
  * fails the whole boot when a plugin apply throws.
@@ -10,9 +10,10 @@
  * @module dsh-openmeter/client
  */
 
-import { createElement } from 'react'
+import { createElement, useSyncExternalStore } from 'react'
+import type { ReactNode } from 'react'
 import { cardFace } from './form.ts'
-import type { OpenMeterSettingsScope } from './form.ts'
+import type { CardFace, CardState, OpenMeterSettingsScope } from './form.ts'
 import { OpenMeterSettingsCard } from './card.tsx'
 import { BillingPanel } from './panel.tsx'
 import { dictionary, en, zh } from './locales.ts'
@@ -20,13 +21,15 @@ import { dictionary, en, zh } from './locales.ts'
 /** Locale namespace this plugin owns. */
 const NS = 'openmeter'
 
-/** Settings namespace the card edits. */
+/** Settings namespace the config card edits. */
 const OPENMETER_NS = 'openmeter'
+
+/** Settings nav id (between `plugins` order 15 and `agent-presets` order 20). */
+const SECTION_ID = 'openmeter'
 
 /** Minimal client-context surface this plugin uses (services are duck-typed). */
 interface ClientContext {
   effect(register: () => (() => void) | void, label?: string): () => void
-  inject(deps: readonly string[], callback: (scoped: ClientContext & Record<string, unknown>) => void, label?: string): unknown
   get(name: string): unknown
   locale: { register(ns: string, dicts: { zh: unknown, en: unknown }): () => void }
   slots: {
@@ -36,22 +39,11 @@ interface ClientContext {
   settingsScope: { bind<S>(spec: { namespace: string }): S }
 }
 
-/** better-sidebar's tab descriptor, duck-typed. */
-interface SidebarTabDescriptor {
-  id: string
-  title: () => string
-  icon: (size: number) => unknown
-  order?: number
-  single?: boolean
-  component: () => unknown
-}
-
 /** Required services: slot registry, locale dictionaries, settings scope. */
 export const inject: string[] = ['slots', 'locale', 'settingsScope']
 
 /**
- * Mount the browser half: locale dictionaries, the settings card, and — when
- * better-sidebar is installed — the billing panel tab.
+ * Mount the browser half: locale dictionaries and the Settings nav entry.
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
@@ -64,29 +56,31 @@ export function apply(ctx: ClientContext): void {
       }
     }, 'openmeter: dictionaries')
   } catch {
-    // The card and panel keep their navigator-language fallback dictionaries.
+    // The section keeps its navigator-language fallback dictionaries.
   }
-  mountSettingsCard(ctx)
-  mountSidebarTab(ctx)
+  mountBillingSection(ctx)
 }
 
 /**
- * Register the settings card into the official plugin-configuration slot.
+ * Register the 计费 section as its own Settings page, with the config card
+ * embedded as the 设置 view.
  * @param ctx - client root context.
  */
-function mountSettingsCard(ctx: ClientContext): void {
+function mountBillingSection(ctx: ClientContext): void {
   try {
-    const binder = (ctx.get('webUiSettings') as { bind: ClientContext['settingsScope']['bind'] } | undefined) ?? ctx.settingsScope
-    const scope = binder.bind<OpenMeterSettingsScope>({ namespace: OPENMETER_NS })
-    const face = cardFace(scope)
-    ctx.slots.inject('settings.plugin.item', () => {
+    let config: ReturnType<typeof buildConfigCard> | undefined
+    ctx.slots.inject('settings.section', () => {
       try {
         const unregister = ctx.slots.register({
-          name: 'settings.plugin.item',
-          key: OPENMETER_NS,
+          name: 'settings.section',
+          id: SECTION_ID,
+          order: 16,
+          label: () => dictionary()['nav.title'] ?? '计费',
           locale: NS,
-          inject: () => face,
-        }, OpenMeterSettingsCard as never)
+        }, () => {
+          config ??= buildConfigCard(ctx)
+          return createElement(BillingPanel, { config } as never)
+        })
         return () => {
           unregister()
         }
@@ -95,33 +89,36 @@ function mountSettingsCard(ctx: ClientContext): void {
       }
     })
   } catch {
-    // Without a settings scope the card stays absent; the panel still works.
+    // Without the settings shell the section stays absent.
   }
 }
 
 /**
- * Register the billing panel tab when betterSidebar exists.
+ * Build the config card node: the staged form bound to the openmeter
+ * settings namespace.
  * @param ctx - client root context.
+ * @returns the card element.
  */
-function mountSidebarTab(ctx: ClientContext): void {
-  try {
-    ctx.inject(['betterSidebar'], scoped => {
-      const sidebar = (scoped as { betterSidebar?: { registerTab(descriptor: SidebarTabDescriptor): () => void } }).betterSidebar
-      if (sidebar === undefined) return
-      try {
-        scoped.effect(() => sidebar.registerTab({
-          id: 'dsh-openmeter:panel',
-          title: () => dictionary()['tab.title'] ?? '计费',
-          icon: size => createElement('span', { 'aria-hidden': true, style: { fontSize: Math.max(12, size - 2), lineHeight: 1 } }, '💰'),
-          order: 56,
-          single: true,
-          component: () => BillingPanel(),
-        }), 'openmeter: better-sidebar tab')
-      } catch {
-        // A tab-type collision breaks nothing else.
-      }
-    }, 'openmeter: sidebar')
-  } catch {
-    // Without better-sidebar the plugin contributes only the settings card.
-  }
+function buildConfigCard(ctx: ClientContext): ReactNode {
+  const binder = (ctx.get('webUiSettings') as { bind: ClientContext['settingsScope']['bind'] } | undefined) ?? ctx.settingsScope
+  const scope = binder.bind<OpenMeterSettingsScope>({ namespace: OPENMETER_NS })
+  return createElement(ConfigCard, { face: cardFace(scope) })
+}
+
+/**
+ * The config card wrapped for direct mounting: adapts the card store into the
+ * selector hook the card expects (the slot renderer normally binds this).
+ * @param props - the staged-form face.
+ * @returns the card.
+ */
+function ConfigCard(props: { face: CardFace }): ReactNode {
+  const store = props.face.hooks.openmeterSettingsCard
+  const useCard = <T,>(select: (state: CardState) => T): T => select(useSyncExternalStore(store.subscribe, store.getSnapshot))
+  return createElement(OpenMeterSettingsCard, {
+    useOpenMeterSettingsCard: useCard,
+    edit: props.face.edit,
+    resetField: props.face.resetField,
+    save: props.face.save,
+    discard: props.face.discard,
+  })
 }

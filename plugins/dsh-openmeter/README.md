@@ -15,8 +15,7 @@ OpenMeter 计费插件 for DeepSeek Harness：把每次 LLM 模型调用的 toke
 
 ## 界面
 
-- 侧边栏「计费」标签页：**用量**（本月按客户聚合 + 最近逐调用明细与估算金额）／**收银台**（客户列表+余额、充值=grant、手动阻断/解封、预设↔客户映射）。
-- 设置 → 插件 → OpenMeter：endpoint / token / featureKey / meterSlug / 币种 / 阻断开关等，保存即热生效。
+设置里的一级页面「计费」（不占用插件管理区）：**用量**（本月按客户聚合 + 最近逐调用明细与估算金额）／**收银台**（客户列表+余额、充值=grant、手动阻断/解封、预设↔客户映射）／**设置**（endpoint / token / featureKey / meterSlug / 币种 / 阻断开关等，保存即热生效）。
 
 ## 部署
 
@@ -94,4 +93,4 @@ node scripts/smoke.mjs [endpoint]
 pnpm test && pnpm typecheck && pnpm build
 ```
 
-宿主半区 `src/`（pipeline / wal / forwarder / gate / estimator / store / routes / openmeter client），浏览器半区 `src/client/`（settings card + better-sidebar 面板），契约见各文件头注释。
+宿主半区 `src/`（pipeline / wal / forwarder / gate / estimator / store / routes / openmeter client），浏览器半区 `src/client/`（设置一级「计费」页面：用量/收银台/设置卡片），契约见各文件头注释。
