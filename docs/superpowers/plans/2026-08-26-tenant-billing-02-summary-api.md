@@ -29,11 +29,11 @@
 - Consumes: `TenantPolicy`, `OpenMeterClient.entitlementValue(subject, featureKey)`, and local pipeline aggregates.
 - Produces: `TenantSummary { tenantId, subject, availableTokens, hasAccess, usageTokens7d, estimatedCny7d, asOf, availability }`.
 
-- [ ] **Step 1:** Write tests for mapped subject success, OpenMeter rejection, missing entitlement, and Token/CNY field separation.
-- [ ] **Step 2:** Run the focused test and record the expected missing-module failure.
-- [ ] **Step 3:** Implement `loadTenantSummary` with a discriminated `availability: 'ready' | 'unavailable' | 'unmapped'` result; never convert exceptions to zero.
-- [ ] **Step 4:** Run the focused tests and typecheck the package.
-- [ ] **Step 5:** Commit `feat: add tenant credit summary service`.
+- [x] **Step 1:** Write tests for mapped subject success, OpenMeter rejection, missing entitlement, and Token/CNY field separation.
+- [x] **Step 2:** Run the focused test and record the expected missing-module failure.
+- [x] **Step 3:** Implement `loadTenantSummary` with a discriminated `availability: 'ready' | 'unavailable' | 'unmapped'` result; never convert exceptions to zero.
+- [x] **Step 4:** Run the focused tests and typecheck the package.
+- [x] **Step 5:** Commit `feat: add tenant credit summary service`.
 
 ### Task 2: Mount `/me/summary`
 
