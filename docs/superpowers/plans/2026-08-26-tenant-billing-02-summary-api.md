@@ -42,8 +42,8 @@
 - Modify: `plugins/dsh-openmeter/src/client/api.ts`
 - Test: `plugins/dsh-openmeter/tests/routes.spec.ts`
 
-- [ ] **Step 1:** Add failing HTTP tests asserting 401 without identity and 200 with only the current tenant's summary.
-- [ ] **Step 2:** Run the focused route tests and verify failure.
-- [ ] **Step 3:** Register `GET /api/openmeter/me/summary`, call the service with the resolved policy, and add a typed `api.summary()` client method.
-- [ ] **Step 4:** Run focused tests plus `pnpm --dir plugins/dsh-openmeter typecheck`.
-- [ ] **Step 5:** Commit `feat: expose tenant credit summary api`.
+- [x] **Step 1:** Add failing HTTP tests asserting 401 without identity and 200 with only the current tenant's summary.
+- [x] **Step 2:** Run the focused route tests and verify failure.
+- [x] **Step 3:** Register `GET /api/openmeter/me/summary`, call the service with the resolved policy, and add a typed `api.summary()` client method.
+- [x] **Step 4:** Run focused tests plus `pnpm --dir plugins/dsh-openmeter typecheck`.
+- [x] **Step 5:** Commit `feat: expose tenant credit summary api`.

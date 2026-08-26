@@ -3,10 +3,17 @@
  * /api/openmeter/*, guarded loopback+same-origin. Read routes are GET; the
  * cashier's writes (customers, grants, blocks, bindings) are POST.
  *
- * Every route is an operator surface: when an auth seam is wired the request
- * must resolve to an operator policy (loopback guard → verified identity →
- * resolvable tenant policy → isOperator) before any OpenMeter call or store
- * read; with no seam the stock loopback-guarded behavior is unchanged.
+ * Every cashier route is an operator surface: when an auth seam is wired the
+ * request must resolve to an operator policy (loopback guard → verified
+ * identity → resolvable tenant policy → isOperator) before any OpenMeter call
+ * or store read; with no seam the stock loopback-guarded behavior is unchanged.
+ *
+ * The ONE tenant surface is /me/summary: any authenticated member of a mapped
+ * tenant (no role requirement) reads only their own tenant's summary. It has
+ * no stock/loopback compatibility path — /me is meaningless without an
+ * identity to scope to, so when no auth seam is wired (or its identity source
+ * is absent at request time) it answers 401 unauthenticated rather than serve
+ * tenant data unscoped.
  *
  * @module dsh-openmeter/routes
  */
@@ -16,6 +23,7 @@ import { guard, readJsonBody, writeJson } from './http.ts'
 import type { GuardedResponse } from './http.ts'
 import { requireOperator, resolveTenantPolicy } from './tenant-policy.ts'
 import type { PolicyError, TenantPolicy, TenantPolicyOptions } from './tenant-policy.ts'
+import { loadTenantSummary } from './tenant-summary.ts'
 import type { OpenMeterClient } from './openmeter.ts'
 import type { BalanceGate } from './gate.ts'
 import type { Forwarder } from './forwarder.ts'
@@ -135,6 +143,29 @@ async function authorizeOperator(req: IncomingMessage, res: ServerResponse, deps
 }
 
 /**
+ * The tenant-route gate: loopback trust first, then only auth availability —
+ * no operator role check (any mapped tenant member may read their own
+ * summary). Unlike authorizeOperator there is no stock compatibility path:
+ * with no seam wired, or its identity source absent at request time, /me has
+ * no identity to scope to, so the honest answer is 401 unauthenticated and
+ * tenant data is never served unscoped. Policy resolution is left to the
+ * caller so its result can flow straight into the summary service.
+ * @param req - the incoming request.
+ * @param res - the response.
+ * @param deps - the wired collaborators.
+ * @returns the live auth seam, or null once the error response was written.
+ */
+function authorizeTenant(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): RouteAuth | null {
+  if (guard(req, res)) return null
+  const auth = deps.auth
+  if (auth === undefined || !(auth.available?.() ?? true)) {
+    writeJson(res, 401, { ok: false, error: 'unauthenticated' })
+    return null
+  }
+  return auth
+}
+
+/**
  * Mount every /api/openmeter route on one webServer.
  * @param webServer - the host webServer service.
  * @param deps - the wired collaborators.
@@ -177,6 +208,8 @@ export function mountRoutes(webServer: WebServerLike, deps: RouteDeps): Disposer
   route('/api/openmeter/block', (req, res) => handleBlock(req, res, deps))
 
   route('/api/openmeter/bindings', (req, res) => handleBindings(req, res, deps))
+
+  route('/api/openmeter/me/summary', (req, res) => handleMeSummary(req, res, deps))
 
   return () => {
     for (const dispose of disposers.splice(0)) dispose()
@@ -328,6 +361,31 @@ async function handleBindings(req: IncomingMessage, res: ServerResponse, deps: R
   } catch (error) {
     writeJson(res, 500, { ok: false, error: describe(error) })
   }
+}
+
+/**
+ * GET: the caller's own tenant credit summary. The subject comes only from
+ * the resolved policy (never query or body input), the 7-day window reads the
+ * FULL pipeline ring (cap 500, not the 100 default), and the route layer uses
+ * the real clock — the service keeps its own clock seam. An OpenMeter
+ * rejection stays a 200 `unavailable` state: safe, explainable, free of
+ * endpoint/token/error text, with local aggregates still present.
+ */
+async function handleMeSummary(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
+  const auth = authorizeTenant(req, res, deps)
+  if (auth === null) return
+  if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
+  const featureKey = deps.getConfig().featureKey
+  const summary = await loadTenantSummary(await resolveRequestPolicy(req, auth), {
+    entitlement: subject => deps.client().entitlementValue(subject, featureKey),
+    recentRows: () => deps.pipeline.usageRows(500),
+    now: () => Date.now(),
+  })
+  if (summary.availability === 'unmapped') {
+    writePolicyError(res, { ok: false, code: summary.code })
+    return
+  }
+  writeJson(res, 200, { ok: true, ...summary })
 }
 
 /**
