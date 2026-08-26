@@ -10,15 +10,24 @@
 #   HIGRESS_INSTALL_SCRIPT_URL — override to pin a different installer
 set -euo pipefail
 
-# Load the sibling .env when present (README documents this workflow);
-# real environment variables win because .env is only a fallback here.
+# Load the sibling .env's PORT variables when present; real environment
+# variables win (same precedence as smoke.mjs's loader). Only the three
+# port names are consumed — key memos in .env never reach the installer.
 _env_file="$(cd "$(dirname "$0")" && pwd)/.env"
 if [ -f "$_env_file" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$_env_file"
-  set +a
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+      ''|'#'*) continue ;;
+      GATEWAY_HTTP_PORT=*|GATEWAY_HTTPS_PORT=*|CONSOLE_PORT=*)
+        _key="${_line%%=*}"
+        if [ -z "${!_key:-}" ]; then
+          export "$_line"
+        fi
+        ;;
+    esac
+  done < "$_env_file"
 fi
+unset _env_file _line _key
 
 GATEWAY_HTTP_PORT="${GATEWAY_HTTP_PORT:-8080}"
 GATEWAY_HTTPS_PORT="${GATEWAY_HTTPS_PORT:-8443}"
