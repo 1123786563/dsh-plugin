@@ -1,0 +1,7 @@
+# dsh-higress bundle layer: activate the plugin with defaults from the
+# launching environment. Endpoint/key resolution order inside the plugin is
+# settings > HIGRESS_BASE_URL env > built-in default; nothing needs to be
+# frozen here.
+- insert:
+    - id: llm-higress
+      name: dsh-higress
