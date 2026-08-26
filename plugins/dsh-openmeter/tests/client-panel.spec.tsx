@@ -12,6 +12,9 @@ function t(key: string, params?: Record<string, string | number>): string {
   return format(zh[key] ?? key, params ?? {})
 }
 
+/** Format a number the way panel.tsx renders it: the runtime-default locale. */
+const num = (n: number): string => n.toLocaleString()
+
 const NOW = Date.parse('2026-08-30T12:00:00.000Z')
 
 function makeSummary(overrides: {
@@ -129,7 +132,7 @@ describe('BillingPanel overview (tenant surface)', () => {
       ]))],
     })
     renderPanel()
-    expect(await screen.findByText(/8,000 Token/)).toBeTruthy()
+    expect(await screen.findByText(new RegExp(`${num(8000)} Token`))).toBeTruthy()
     expect(screen.getByText(t('overview.runway', { days: 40 }))).toBeTruthy()
     expect(screen.getByText(/更新于/)).toBeTruthy()
     expect(screen.queryByText(/deepseek-vlm/)).toBeNull()
@@ -137,6 +140,26 @@ describe('BillingPanel overview (tenant surface)', () => {
     expect(chat).toEqual(['deepseek-chat', '2', '750', '¥3.00', '75%'])
     const reasoner = Array.from(screen.getByText('deepseek-reasoner').closest('tr')?.querySelectorAll('td') ?? []).map(td => td.textContent)
     expect(reasoner).toEqual(['deepseek-reasoner', '1', '800', '¥1.00', '25%'])
+  })
+
+  it('counts non-CNY row tokens but excludes their amounts from the CNY totals', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([
+        makeRow({ model: 'deepseek-chat', usage: { inputTokens: 300, outputTokens: 100 }, estimatedAmount: 1.5 }),
+        makeRow({ model: 'deepseek-reasoner', usage: { inputTokens: 200, outputTokens: 100 }, estimatedAmount: 0.5 }),
+        makeRow({ model: 'x-usd', usage: { inputTokens: 500, outputTokens: 100 }, estimatedAmount: 9, currency: 'USD' }),
+      ]))],
+    })
+    renderPanel()
+    expect(await screen.findByText('x-usd')).toBeTruthy()
+    const chat = Array.from(screen.getByText('deepseek-chat').closest('tr')?.querySelectorAll('td') ?? []).map(td => td.textContent)
+    expect(chat).toEqual(['deepseek-chat', '1', '400', '¥1.50', '75%'])
+    const reasoner = Array.from(screen.getByText('deepseek-reasoner').closest('tr')?.querySelectorAll('td') ?? []).map(td => td.textContent)
+    expect(reasoner).toEqual(['deepseek-reasoner', '1', '300', '¥0.50', '25%'])
+    const usd = Array.from(screen.getByText('x-usd').closest('tr')?.querySelectorAll('td') ?? []).map(td => td.textContent)
+    expect(usd).toEqual(['x-usd', '1', '600', '¥0.00', '0%'])
   })
 
   it('routes the detail CTA to onOpenUsageDetail exactly once per click', async () => {
@@ -170,7 +193,7 @@ describe('BillingPanel overview (tenant surface)', () => {
     })
     renderPanel()
     expect(await screen.findByText(t('overview.unavailable'))).toBeTruthy()
-    const aggregates = screen.getByText(/1,200 Token/)
+    const aggregates = screen.getByText(new RegExp(`${num(1200)} Token`))
     expect(aggregates.textContent).toContain('¥3.50')
     expect(screen.getByText('deepseek-chat')).toBeTruthy()
     expect(screen.queryByText(new RegExp(t('overview.balance')))).toBeNull()
@@ -199,8 +222,23 @@ describe('BillingPanel overview (tenant surface)', () => {
     expect(await screen.findByText(t('overview.error'))).toBeTruthy()
     expect(counts.summary).toBe(1)
     fireEvent.click(screen.getByText(t('overview.retry')))
-    expect(await screen.findByText(/8,000 Token/)).toBeTruthy()
+    expect(await screen.findByText(new RegExp(`${num(8000)} Token`))).toBeTruthy()
     expect(counts.summary).toBe(2)
+  })
+
+  it('degrades only the model table when the usage fetch rejects', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [{ rejects: new Error('usage down') }],
+    })
+    renderPanel()
+    expect(await screen.findByText(t('overview.modelsUnavailable'))).toBeTruthy()
+    expect(screen.getByText(t('overview.models'))).toBeTruthy()
+    expect(screen.queryByText(t('overview.model'))).toBeNull()
+    expect(screen.getByText(new RegExp(`${num(8000)} Token`))).toBeTruthy()
+    const aggregates = screen.getByText(new RegExp(`${num(1400)} Token`))
+    expect(aggregates.textContent).toContain('¥12.50')
   })
 
   it('pins the narrow-screen layout: wrapping rows and full-width tables', async () => {
@@ -210,8 +248,8 @@ describe('BillingPanel overview (tenant surface)', () => {
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 2 })]))],
     })
     const { container } = renderPanel()
-    await screen.findByText(/8,000 Token/)
-    expect(screen.getByText(/8,000 Token/).closest('div')?.style.flexWrap).toBe('wrap')
+    await screen.findByText(new RegExp(`${num(8000)} Token`))
+    expect(screen.getByText(new RegExp(`${num(8000)} Token`)).closest('div')?.style.flexWrap).toBe('wrap')
     expect(screen.getByText(t('overview.detail')).closest('div')?.style.flexWrap).toBe('wrap')
     const tables = Array.from(container.querySelectorAll('table'))
     expect(tables.length).toBeGreaterThan(0)
@@ -225,7 +263,7 @@ describe('BillingPanel overview (tenant surface)', () => {
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 2 })]))],
     })
     render(<BillingPanel t={t} config={<div>CONFIG_CARD</div>} />)
-    expect(await screen.findByText(/8,000 Token/)).toBeTruthy()
+    expect(await screen.findByText(new RegExp(`${num(8000)} Token`))).toBeTruthy()
     expect(screen.getByText(t('panel.overview'))).toBeTruthy()
     expect(screen.getByText(t('panel.cashier'))).toBeTruthy()
     expect(screen.getByText(t('panel.settings'))).toBeTruthy()
@@ -241,7 +279,7 @@ describe('BillingPanel overview (tenant surface)', () => {
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 2 })]))],
     })
     renderPanel()
-    await screen.findByText(/8,000 Token/)
+    await screen.findByText(new RegExp(`${num(8000)} Token`))
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 30))
     })
@@ -256,7 +294,7 @@ describe('BillingPanel overview (tenant surface)', () => {
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 2 })]))],
     })
     renderPanel()
-    await screen.findByText(/8,000 Token/)
+    await screen.findByText(new RegExp(`${num(8000)} Token`))
     fireEvent.click(screen.getByText(t('panel.refresh')))
     await waitFor(() => {
       expect(counts.summary).toBe(2)
