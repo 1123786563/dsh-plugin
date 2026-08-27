@@ -770,6 +770,52 @@ describe('mountRoutes /me/usage tenant route', () => {
     }
   })
 
+  it('pins the route limit ceiling and default at the ledger seam: 999999 and 101 clamp to 100, an absent limit serves 50', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'a1' }))
+      const queries: UsageQuery[] = []
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, usageDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), recordingLedger(ledger, queries)))
+      // Over-ceiling integers still answer a valid 200 page...
+      for (const limit of ['999999', '101']) {
+        const result = await dispatch(server.handlers, 'GET', `/api/openmeter/me/usage?limit=${limit}`)
+        expect(result.status, `limit=${limit}`).toBe(200)
+        expect(JSON.parse(result.body).rows, `limit=${limit}`).toHaveLength(1)
+      }
+      // ...and so does an omitted limit.
+      const defaulted = await dispatch(server.handlers, 'GET', '/api/openmeter/me/usage')
+      expect(defaulted.status).toBe(200)
+      expect(JSON.parse(defaulted.body).rows).toHaveLength(1)
+      // The queries that reached the ledger: the ROUTE ceiling (100, not the
+      // ledger's own 1000) and the ROUTE default (50, not the ledger's 500).
+      expect(queries).toEqual([
+        { subject: 'cust-acme', limit: 100 },
+        { subject: 'cust-acme', limit: 100 },
+        { subject: 'cust-acme', limit: 50 },
+      ])
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('answers 400 invalid-query for a structurally-valid cursor the ledger rejects (defense-in-depth)', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'a1' }))
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, usageDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), ledger))
+      // "AAAA" is base64url alphabet and non-empty, so the strict parse
+      // passes it through; it decodes to non-JSON bytes, so the LEDGER
+      // throws LedgerQueryError and the route maps it to the client's 400.
+      const result = await dispatch(server.handlers, 'GET', '/api/openmeter/me/usage?cursor=AAAA')
+      expect(result.status).toBe(400)
+      expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'invalid-query' })
+    } finally {
+      ledger.close()
+    }
+  })
+
   it('answers 400 subject-not-allowed when a subject or tenantId parameter is present, even empty', async () => {
     const ledger = await openUsageLedger()
     try {

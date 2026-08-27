@@ -512,8 +512,7 @@ function toUsageDetailRow(row: LedgerRow): UsageDetailRow {
  * parameters narrow time/model/page but never select a tenant. A missing
  * ledger seam or a non-query ledger failure (sqlite, closed) answers 503
  * ledger-unavailable with no internal error text; a malformed query answers
- * 400. The route layer uses the real clock — paging is cursor-driven, so
- * none is needed.
+ * 400. The route layer keeps no clock — paging is cursor-driven.
  */
 async function handleMeUsage(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
   const auth = authorizeTenant(req, res, deps)
