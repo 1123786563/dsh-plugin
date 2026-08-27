@@ -38,6 +38,11 @@ function row(overrides: Partial<LedgerRow> = {}): LedgerRow {
     provider: 'deepseek',
     model: 'glm-5.3',
     tokens: 150,
+    inputTokens: 100,
+    outputTokens: 40,
+    cacheReadTokens: 5,
+    cacheWriteTokens: 3,
+    reasoningTokens: 2,
     estimatedAmount: 0.0021,
     currency: 'CNY',
     unpriced: false,
@@ -242,7 +247,7 @@ describe('UsageLedger', () => {
     const probe = new DatabaseSync(join(target, 'usage-ledger.sqlite'))
     try {
       const applied = probe.prepare('SELECT COUNT(*) AS n FROM ledger_migrations').get() as { n: number }
-      expect(applied.n).toBe(1)
+      expect(applied.n).toBe(2)
     } finally {
       probe.close()
     }

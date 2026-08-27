@@ -223,7 +223,8 @@ export class MeteringPipeline {
    * failure is counted ({@link MeteringPipeline.usageLedgerHealth}) and
    * never breaks metering.
    * @param config - config snapshot at meter time (source of the row's source).
-   * @param call - the metered call (subject attribution and capture time).
+   * @param call - the metered call (subject attribution, capture time, and
+   *   token dimensions).
    * @param record - the WAL record built for it (event id join key).
    * @param estimate - the estimate shared with the recent ring.
    */
@@ -238,6 +239,11 @@ export class MeteringPipeline {
         provider: call.provider,
         model: call.model,
         tokens: meteredTokens(call.usage),
+        inputTokens: call.usage.inputTokens,
+        outputTokens: call.usage.outputTokens,
+        cacheReadTokens: call.usage.cacheReadTokens ?? 0,
+        cacheWriteTokens: call.usage.cacheWriteTokens ?? 0,
+        reasoningTokens: call.usage.reasoningTokens ?? 0,
         estimatedAmount: estimate.amount,
         currency: estimate.currency,
         unpriced: estimate.unpriced,

@@ -200,6 +200,12 @@ describe('durable usage ledger integration', () => {
     expect(row.source).toBe(config.eventSource)
     expect(row.provider).toBe('deepseek')
     expect(row.model).toBe('glm-5.3')
+    // Dimensions mirror the fixture's usage buckets; absent buckets land as 0.
+    expect(row.inputTokens).toBe(100)
+    expect(row.outputTokens).toBe(50)
+    expect(row.cacheReadTokens).toBe(0)
+    expect(row.cacheWriteTokens).toBe(0)
+    expect(row.reasoningTokens).toBe(0)
     // The test client serves no price rows: the estimate is the unpriced zero.
     expect(row.estimatedAmount).toBe(0)
     expect(row.currency).toBe(config.quoteCurrency)
@@ -262,7 +268,56 @@ describe('durable usage ledger integration', () => {
     await vi.waitFor(() => {
       expect(ledger.list({ subject: 'house' })).toHaveLength(1)
     })
-    expect(ledger.list({ subject: 'house' })[0]!.tokens).toBe(180)
+    const stored = ledger.list({ subject: 'house' })[0]!
+    expect(stored.tokens).toBe(180)
+    expect(stored.inputTokens).toBe(100)
+    expect(stored.outputTokens).toBe(50)
+    expect(stored.cacheReadTokens).toBe(20)
+    expect(stored.cacheWriteTokens).toBe(10)
+    expect(stored.reasoningTokens).toBe(0)
+  })
+
+  it('lands all five token dimensions from a metered event in the ledger', async () => {
+    const dimUsage = {
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadTokens: 400,
+      cacheWriteTokens: 80,
+      reasoningTokens: 12,
+    }
+    const { pipeline, ledger: maybeLedger, dir } = await build({})
+    const ledger = maybeLedger!
+    pipeline.onSessionEvent('s1', {
+      type: 'assistant/message',
+      seq: 3,
+      time: 1_700_000_000_000,
+      data: { turn: 1, step: 0, usage: dimUsage, message: { source: { provider: 'deepseek', model: 'glm-5.3' } } },
+    })
+    await vi.waitFor(() => {
+      expect(ledger.list({ subject: 'house' })).toHaveLength(1)
+    })
+    // A fresh connection on the same directory reads the persisted
+    // dimensions back: the stored row, not an in-memory artifact.
+    const reader = UsageLedger.open(dir)
+    try {
+      const page = reader.usagePage({ subject: 'house' })
+      expect(page.rows).toHaveLength(1)
+      // Aggregate stays meteredTokens (billed input + output) alongside
+      // the full decomposition.
+      expect(page.rows[0]!.tokens).toBe(630)
+      expect(page.rows[0]!.inputTokens).toBe(120)
+      expect(page.rows[0]!.outputTokens).toBe(30)
+      expect(page.rows[0]!.cacheReadTokens).toBe(400)
+      expect(page.rows[0]!.cacheWriteTokens).toBe(80)
+      expect(page.rows[0]!.reasoningTokens).toBe(12)
+      expect(page.totals.inputTokens).toBe(120)
+      expect(page.totals.outputTokens).toBe(30)
+      expect(page.totals.cacheReadTokens).toBe(400)
+      expect(page.totals.cacheWriteTokens).toBe(80)
+      expect(page.totals.reasoningTokens).toBe(12)
+    } finally {
+      reader.close()
+    }
   })
 
   it('recovers persisted rows across a new pipeline instance on the same directory', async () => {

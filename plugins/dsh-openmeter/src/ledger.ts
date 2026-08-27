@@ -28,7 +28,12 @@ export const LEDGER_LIMIT_DEFAULT = 500
 /** Hard ceiling for {@link UsageLedger.list} limits. */
 const LEDGER_LIMIT_MAX = 1000
 
-/** One metered usage event as stored and served for display/estimates. */
+/**
+ * One metered usage event as stored and served for display/estimates.
+ * The five token-dimension fields are required: rows written before the
+ * 0002 migration read back with every dimension at 0 (the SQL default),
+ * never a fabricated split.
+ */
 export interface LedgerRow {
   source: string
   eventId: string
@@ -37,6 +42,11 @@ export interface LedgerRow {
   provider: string
   model: string
   tokens: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
   estimatedAmount: number
   currency: string
   unpriced: boolean
@@ -86,6 +96,49 @@ export interface LedgerQuery {
   limit?: number
 }
 
+/**
+ * Tenant-scoped paged usage read: subject (exact match) with inclusive
+ * from/to epoch-ms bounds, exact model match, an opaque keyset cursor,
+ * and a limit clamped into 1..1000 (default 500).
+ */
+export interface UsageQuery {
+  subject: string
+  from?: number
+  to?: number
+  model?: string
+  cursor?: string
+  limit?: number
+}
+
+/**
+ * Aggregate figures over a set of rows: call and token counts (aggregate
+ * plus the five dimensions), a CNY-only priced sum, and unpriced calls.
+ */
+export interface PageStats {
+  calls: number
+  tokens: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
+  estimatedAmountCny: number
+  unpricedCalls: number
+}
+
+/**
+ * One paged usage result: `page` aggregates the returned rows, `totals`
+ * aggregates the entire filtered set (cursor and limit never apply), and
+ * `cursor` is present only when a full page was returned, encoding the
+ * last row as the next keyset position.
+ */
+export interface UsagePage {
+  rows: LedgerRow[]
+  page: PageStats
+  totals: PageStats
+  cursor?: string
+}
+
 /** usage_ledger row in its SQL column naming. */
 interface UsageLedgerSqlRow {
   source: string
@@ -95,17 +148,35 @@ interface UsageLedgerSqlRow {
   provider: string
   model: string
   tokens: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  reasoning_tokens: number
   estimated_amount: number
   currency: string
   unpriced: number
 }
 
+/** Aggregated totals row from the usagePage totals statement. */
+interface UsageTotalsSqlRow {
+  calls: number
+  tokens: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  reasoning_tokens: number
+  estimated_amount_cny: number
+  unpriced_calls: number
+}
+
 /** Prepared `node:sqlite` statement, cached on the owning instance. */
 type SqlStatement = ReturnType<DatabaseSync['prepare']>
 
-/** Static SELECT column list shared by every {@link UsageLedger.list} variant. */
+/** Static SELECT column list shared by every read statement. */
 const LEDGER_COLUMNS =
-  'source, event_id, subject, captured_at, provider, model, tokens, estimated_amount, currency, unpriced'
+  'source, event_id, subject, captured_at, provider, model, tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, estimated_amount, currency, unpriced'
 
 /**
  * Build one static list statement for a fixed WHERE clause; parameters and
@@ -145,6 +216,18 @@ const MIGRATIONS: ReadonlyArray<{ name: string, sql: string }> = [
       CREATE INDEX IF NOT EXISTS usage_ledger_subject_time ON usage_ledger(subject, captured_at DESC);
     `,
   },
+  {
+    // Pre-0002 rows keep their aggregate tokens and read back with every
+    // dimension at 0: no fabricated decomposition.
+    name: '0002-add-token-dimensions',
+    sql: `
+      ALTER TABLE usage_ledger ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE usage_ledger ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE usage_ledger ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE usage_ledger ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE usage_ledger ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ]
 
 /**
@@ -161,9 +244,29 @@ function validateRow(row: LedgerRow): void {
   if (!isNonEmptyString(row.model)) fields.push('model')
   if (!isNonEmptyString(row.currency)) fields.push('currency')
   if (!Number.isSafeInteger(row.tokens) || row.tokens < 0) fields.push('tokens')
+  if (!isOptionalSafeNonNegative(row.inputTokens)) fields.push('inputTokens')
+  if (!isOptionalSafeNonNegative(row.outputTokens)) fields.push('outputTokens')
+  if (!isOptionalSafeNonNegative(row.cacheReadTokens)) fields.push('cacheReadTokens')
+  if (!isOptionalSafeNonNegative(row.cacheWriteTokens)) fields.push('cacheWriteTokens')
+  if (!isOptionalSafeNonNegative(row.reasoningTokens)) fields.push('reasoningTokens')
   if (!isFiniteNonNegative(row.estimatedAmount)) fields.push('estimatedAmount')
   if (!Number.isSafeInteger(row.capturedAt)) fields.push('capturedAt')
   if (fields.length > 0) throw new LedgerRowError(`invalid ledger row: ${fields.join(', ')}`)
+}
+
+/**
+ * Collect every {@link LedgerQuery} field that fails its shape contract;
+ * the subject rule list() always implied is explicit here too.
+ * @param query - the candidate query.
+ * @returns the offending field names, in declaration order.
+ */
+function collectQueryFields(query: LedgerQuery): string[] {
+  const fields: string[] = []
+  if (!isNonEmptyString(query.subject)) fields.push('subject')
+  if (query.from !== undefined && !Number.isSafeInteger(query.from)) fields.push('from')
+  if (query.to !== undefined && !Number.isSafeInteger(query.to)) fields.push('to')
+  if (query.limit !== undefined && !Number.isFinite(query.limit)) fields.push('limit')
+  return fields
 }
 
 /**
@@ -173,11 +276,27 @@ function validateRow(row: LedgerRow): void {
  * @param query - the candidate query.
  */
 function validateQuery(query: LedgerQuery): void {
-  const fields: string[] = []
-  if (query.from !== undefined && !Number.isSafeInteger(query.from)) fields.push('from')
-  if (query.to !== undefined && !Number.isSafeInteger(query.to)) fields.push('to')
-  if (query.limit !== undefined && !Number.isFinite(query.limit)) fields.push('limit')
+  const fields = collectQueryFields(query)
   if (fields.length > 0) throw new LedgerQueryError(`invalid ledger query: ${fields.join(', ')}`)
+}
+
+/**
+ * Throw {@link LedgerQueryError} naming every {@link UsageQuery} field
+ * that fails its shape contract, including a cursor that does not decode;
+ * called before any SQL so a rejected query never reaches the database.
+ * @param query - the candidate usage query.
+ */
+function validateUsageQuery(query: UsageQuery): void {
+  const fields = collectQueryFields(query)
+  if (query.model !== undefined && !isNonEmptyString(query.model)) fields.push('model')
+  if (query.cursor !== undefined) {
+    try {
+      decodePageCursor(query.cursor)
+    } catch {
+      fields.push('cursor')
+    }
+  }
+  if (fields.length > 0) throw new LedgerQueryError(`invalid usage query: ${fields.join(', ')}`)
 }
 
 /**
@@ -194,6 +313,14 @@ function isNonEmptyString(value: unknown): boolean {
  */
 function isFiniteNonNegative(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/**
+ * @param value - candidate token dimension, when the caller has one.
+ * @returns whether the value is absent (stored as 0) or a safe integer ≥ 0.
+ */
+function isOptionalSafeNonNegative(value: number | undefined): boolean {
+  return value === undefined || (Number.isSafeInteger(value) && value >= 0)
 }
 
 /**
@@ -229,10 +356,88 @@ function toLedgerRow(row: UsageLedgerSqlRow): LedgerRow {
     provider: row.provider,
     model: row.model,
     tokens: row.tokens,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    reasoningTokens: row.reasoning_tokens,
     estimatedAmount: row.estimated_amount,
     currency: row.currency,
     unpriced: row.unpriced !== 0,
   }
+}
+
+/** base64url alphabet (padding `=` never emitted; standard base64 with
+ * `+`→`-`, `/`→`_`, trailing `=` stripped). */
+const CURSOR_ALPHABET = /^[A-Za-z0-9_-]+$/
+
+/**
+ * Encode a page cursor: the base64url of `[capturedAt, eventId]` for the
+ * last row of a full page.
+ * @param row - the row the cursor must resume strictly after.
+ * @returns the opaque cursor string.
+ */
+function encodePageCursor(row: LedgerRow): string {
+  return Buffer.from(JSON.stringify([row.capturedAt, row.eventId]), 'utf8').toString('base64url')
+}
+
+/**
+ * Decode a page cursor produced by {@link encodePageCursor}.
+ * @param cursor - the opaque cursor string.
+ * @returns the keyset position it encodes.
+ * @throws LedgerQueryError naming `cursor` when the string is not
+ *   base64url, not JSON, not a `[safe-integer ms ≥ 0, string eventId]`
+ *   pair.
+ */
+function decodePageCursor(cursor: string): { capturedAt: number, eventId: string } {
+  if (!CURSOR_ALPHABET.test(cursor)) throw new LedgerQueryError('invalid usage query: cursor')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+  } catch {
+    throw new LedgerQueryError('invalid usage query: cursor')
+  }
+  const [capturedAt, eventId] = Array.isArray(parsed) ? parsed : []
+  if (
+    !Number.isSafeInteger(capturedAt) ||
+    capturedAt < 0 ||
+    typeof eventId !== 'string'
+  ) {
+    throw new LedgerQueryError('invalid usage query: cursor')
+  }
+  return { capturedAt, eventId }
+}
+
+/**
+ * Aggregate page stats over returned rows in JS (the CNY-only money rule
+ * matches the SQL totals statement: unpriced rows never price and are
+ * counted in unpricedCalls).
+ * @param rows - the returned page, newest first.
+ * @returns the page-local {@link PageStats}.
+ */
+function statsOverRows(rows: LedgerRow[]): PageStats {
+  const stats: PageStats = {
+    calls: rows.length,
+    tokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    estimatedAmountCny: 0,
+    unpricedCalls: 0,
+  }
+  for (const row of rows) {
+    stats.tokens += row.tokens
+    stats.inputTokens += row.inputTokens
+    stats.outputTokens += row.outputTokens
+    stats.cacheReadTokens += row.cacheReadTokens
+    stats.cacheWriteTokens += row.cacheWriteTokens
+    stats.reasoningTokens += row.reasoningTokens
+    if (row.unpriced) stats.unpricedCalls += 1
+    else if (row.currency === 'CNY') stats.estimatedAmountCny += row.estimatedAmount
+  }
+  return stats
 }
 
 /** The connection plus every statement cached on it for one open ledger. */
@@ -323,8 +528,10 @@ export class UsageLedger {
         db,
         insertRow: db.prepare(
           `INSERT INTO usage_ledger
-             (source, event_id, subject, captured_at, provider, model, tokens, estimated_amount, currency, unpriced)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (source, event_id, subject, captured_at, provider, model, tokens,
+              input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,
+              estimated_amount, currency, unpriced)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(source, event_id) DO NOTHING`,
         ),
         countRows: db.prepare('SELECT COUNT(*) AS total FROM usage_ledger'),
@@ -360,6 +567,11 @@ export class UsageLedger {
       row.provider,
       row.model,
       row.tokens,
+      row.inputTokens ?? 0,
+      row.outputTokens ?? 0,
+      row.cacheReadTokens ?? 0,
+      row.cacheWriteTokens ?? 0,
+      row.reasoningTokens ?? 0,
       row.estimatedAmount,
       row.currency,
       row.unpriced ? 1 : 0,
@@ -392,6 +604,93 @@ export class UsageLedger {
     }
     const rows = statement.all(...params, clampLimit(query.limit)) as unknown as UsageLedgerSqlRow[]
     return rows.map(toLedgerRow)
+  }
+
+  /**
+    * Read one subject's usage as a page: newest-first rows ordered by
+    * `captured_at DESC, event_id DESC`, page-local stats over the returned
+    * rows, and totals over the entire filtered set (cursor and limit never
+    * apply to totals). Statements are prepared per call: only fixed
+    * literals from validation-selected branches compose the SQL text;
+    * every value stays a bound parameter.
+    * @param query - subject (exact match) with optional inclusive from/to
+    *   epoch-ms bounds, exact model match, opaque keyset cursor, and a
+    *   limit clamped into 1..1000 (default 500).
+    * @returns the page; `cursor` is present only when a full page was
+    *   returned, encoding the last row as the next keyset position.
+    * @throws LedgerQueryError when subject/from/to/model/cursor/limit
+    *   fail their shape contract.
+    * @throws LedgerClosedError when the ledger has closed.
+    */
+  usagePage(query: UsageQuery): UsagePage {
+    validateUsageQuery(query)
+    const session = this.ensureOpen()
+    const conditions = ['subject = ?']
+    const params: Array<string | number> = [query.subject]
+    if (query.from !== undefined) {
+      conditions.push('captured_at >= ?')
+      params.push(query.from)
+    }
+    if (query.to !== undefined) {
+      conditions.push('captured_at <= ?')
+      params.push(query.to)
+    }
+    if (query.model !== undefined) {
+      conditions.push('model = ?')
+      params.push(query.model)
+    }
+    if (query.cursor !== undefined) {
+      const { capturedAt, eventId } = decodePageCursor(query.cursor)
+      conditions.push('(captured_at < ? OR (captured_at = ? AND event_id < ?))')
+      params.push(capturedAt, capturedAt, eventId)
+    }
+    const effectiveLimit = clampLimit(query.limit)
+    const rowsStatement = session.db.prepare(
+      `SELECT ${LEDGER_COLUMNS}
+       FROM usage_ledger
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY captured_at DESC, event_id DESC
+       LIMIT ?`,
+    )
+    const rows = (
+      rowsStatement.all(...params, effectiveLimit) as unknown as UsageLedgerSqlRow[]
+    ).map(toLedgerRow)
+    // Totals aggregate the same filter minus the cursor predicate (always
+    // appended last): the cursor is a paging position, not a row filter,
+    // and limit never applies either.
+    const totalsConditions = query.cursor === undefined ? conditions : conditions.slice(0, -1)
+    const totalsParams = query.cursor === undefined ? params : params.slice(0, -3)
+    const totalsStatement = session.db.prepare(
+      `SELECT COUNT(*) AS calls,
+              COALESCE(SUM(tokens), 0) AS tokens,
+              COALESCE(SUM(input_tokens), 0) AS input_tokens,
+              COALESCE(SUM(output_tokens), 0) AS output_tokens,
+              COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+              COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+              COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+              COALESCE(SUM(CASE WHEN currency = 'CNY' AND unpriced = 0 THEN estimated_amount ELSE 0 END), 0) AS estimated_amount_cny,
+              COALESCE(SUM(unpriced), 0) AS unpriced_calls
+       FROM usage_ledger
+       WHERE ${totalsConditions.join(' AND ')}`,
+    )
+    const totalsRow = totalsStatement.get(...totalsParams) as unknown as UsageTotalsSqlRow
+    const page: UsagePage = {
+      rows,
+      page: statsOverRows(rows),
+      totals: {
+        calls: totalsRow.calls,
+        tokens: totalsRow.tokens,
+        inputTokens: totalsRow.input_tokens,
+        outputTokens: totalsRow.output_tokens,
+        cacheReadTokens: totalsRow.cache_read_tokens,
+        cacheWriteTokens: totalsRow.cache_write_tokens,
+        reasoningTokens: totalsRow.reasoning_tokens,
+        estimatedAmountCny: totalsRow.estimated_amount_cny,
+        unpricedCalls: totalsRow.unpriced_calls,
+      },
+    }
+    if (rows.length === effectiveLimit) page.cursor = encodePageCursor(rows[rows.length - 1]!)
+    return page
   }
 
   /**

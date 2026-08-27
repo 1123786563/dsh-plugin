@@ -59,7 +59,7 @@ export {
 }
 export { BlockError } from './pipeline.ts'
 export { LEDGER_LIMIT_DEFAULT, LedgerQueryError, LedgerRowError } from './ledger.ts'
-export type { AppendOutcome, LedgerQuery, LedgerRow } from './ledger.ts'
+export type { AppendOutcome, LedgerQuery, LedgerRow, PageStats, UsagePage, UsageQuery } from './ledger.ts'
 export { billedInputTokens, buildWalRecord, meteredTokens } from './cloudevent.ts'
 
 /**
@@ -181,6 +181,7 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
         store,
         estimator,
         wal,
+        usageLedger,
         auth,
       })
     }, 'openmeter: routes')
