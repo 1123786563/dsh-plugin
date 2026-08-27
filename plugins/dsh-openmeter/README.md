@@ -8,6 +8,7 @@ OpenMeter 计费插件 for DeepSeek Harness：把每次 LLM 模型调用的 toke
 
 - **计量**：每条已提交的 assistant 消息 = 一条 CloudEvents 用量事件（replay 安全，`(sessionId, seq)` 去重）。维度：model / provider / purpose / sessionId / rootSessionId（子代理归集）/ presetId。计费输入 = input + cacheRead + cacheWrite；meter 值 = 计费输入 + output。
 - **可靠性（ADR-0002）**：宿主侧 WAL 磁盘队列，至少一次投递，事件 ID 生成后不变；OpenMeter 按 `(namespace, id, source)` 32 天去重，重试不会重复计费；超过去重窗口的未确认记录在重放时丢弃（防双计费）。
+- **本地账本**：持久化本地用量账本（SQLite，`(source, eventId)` 幂等写入）逐条镜像每条已计量事件，作为展示/估算的数据源；写入尽力而为（WAL 为准），失败计入健康计数。
 - **阻断（ADR-0003）**：`llm/stream` 瀑布流前置门禁，余额耗尽抛错拒绝调用；v3 `governance/query` + 60s 缓存 + 充值/解封后强刷；OpenMeter 不可达时放行并计数（fail-open）。内部户（house）与手动解封不受阻。
 - **定价（ADR-0001）**：唯一价格源是 OpenMeter llm-cost 价格库（CNY override），本地缓存用于面板即时估算；断网沿用上次缓存。
 - **归属（ADR-0004）**：`agent 预设 → 客户` 映射（收银台编辑），未绑定会话记内部户（照常计量、永不阻断、兼作运营者自用成本视图）。
@@ -100,4 +101,4 @@ node scripts/smoke.mjs [endpoint]
 pnpm test && pnpm typecheck && pnpm build
 ```
 
-宿主半区 `src/`（pipeline / wal / forwarder / gate / estimator / store / routes / openmeter client），浏览器半区 `src/client/`（设置一级「计费」页面：用量/收银台/设置卡片），契约见各文件头注释。
+宿主半区 `src/`（pipeline / wal / ledger / forwarder / gate / estimator / store / routes / openmeter client），浏览器半区 `src/client/`（设置一级「计费」页面：用量/收银台/设置卡片），契约见各文件头注释。
