@@ -483,7 +483,7 @@ function UsageDetailView(props: { t: T }): ReactNode {
           {t('detail.totals', { stats: statsText(totals.calls, totals.tokens, totals.estimatedAmountCny, totals.unpricedCalls) })}
         </p>
       )}
-      {cursor !== undefined && !loading && (
+      {cursor !== undefined && !loading && !error && (
         <div style={actionsStyle}>
           <button type="button" style={buttonStyle} onClick={() => { if (cursor !== undefined) setCursorPage(cursor) }}>{t('detail.nextPage')}</button>
         </div>

@@ -538,6 +538,32 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
     expect(screen.queryByText(t('detail.nextPage'))).toBeNull()
   })
 
+  it('hides the next-page button after a failed page fetch and resumes from the failed cursor on retry', async () => {
+    const { counts, meUsageUrls } = stubFetch({
+      status: [ok(makeStatus())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+      meUsage: [
+        ok(makeDetailPayload({ rows: [makeDetailRow({ model: 'page-one-row' })], cursor: 'opaque-1' })),
+        { rejects: new Error('page two down') },
+        ok(makeDetailPayload({ rows: [makeDetailRow({ model: 'page-two-row', at: DAY_OLD })], cursor: 'opaque-2' })),
+      ],
+    })
+    renderPanel()
+    fireEvent.click(await screen.findByText(t('overview.detail')))
+    expect(await screen.findByText('page-one-row')).toBeTruthy()
+    fireEvent.click(screen.getByText(t('detail.nextPage')))
+    expect(await screen.findByText(t('detail.error'))).toBeTruthy()
+    expect(screen.getByText('page-one-row')).toBeTruthy()
+    expect(screen.queryByText(t('detail.nextPage'))).toBeNull()
+    fireEvent.click(screen.getByText(t('detail.retry')))
+    expect(await screen.findByText('page-two-row')).toBeTruthy()
+    expect(screen.getByText('page-one-row')).toBeTruthy()
+    expect(screen.getByText(t('detail.nextPage'))).toBeTruthy()
+    expect(meUsageUrls[2]).toContain('cursor=opaque-1')
+    expect(counts.meUsage).toBe(3)
+  })
+
   it('pins the narrow-screen detail layout: wrapping controls and full-width tables', async () => {
     stubFetch({
       status: [ok(makeStatus())],
