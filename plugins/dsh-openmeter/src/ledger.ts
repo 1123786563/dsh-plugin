@@ -30,9 +30,9 @@ const LEDGER_LIMIT_MAX = 1000
 
 /**
  * One metered usage event as stored and served for display/estimates.
- * The five token-dimension fields are optional: an absent dimension
- * persists as 0, matching pre-0002 rows and callers without a
- * decomposition (no fabricated split).
+ * The five token-dimension fields are required: rows written before the
+ * 0002 migration read back with every dimension at 0 (the SQL default),
+ * never a fabricated split.
  */
 export interface LedgerRow {
   source: string
@@ -42,11 +42,11 @@ export interface LedgerRow {
   provider: string
   model: string
   tokens: number
-  inputTokens?: number
-  outputTokens?: number
-  cacheReadTokens?: number
-  cacheWriteTokens?: number
-  reasoningTokens?: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
   estimatedAmount: number
   currency: string
   unpriced: boolean
@@ -148,18 +148,14 @@ interface UsageLedgerSqlRow {
   provider: string
   model: string
   tokens: number
-  estimated_amount: number
-  currency: string
-  unpriced: number
-}
-
-/** usage_ledger row including the 0002 token-dimension columns. */
-interface UsageLedgerDimSqlRow extends UsageLedgerSqlRow {
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
   cache_write_tokens: number
   reasoning_tokens: number
+  estimated_amount: number
+  currency: string
+  unpriced: number
 }
 
 /** Aggregated totals row from the usagePage totals statement. */
@@ -178,13 +174,9 @@ interface UsageTotalsSqlRow {
 /** Prepared `node:sqlite` statement, cached on the owning instance. */
 type SqlStatement = ReturnType<DatabaseSync['prepare']>
 
-/** Static SELECT column list shared by every {@link UsageLedger.list} variant. */
+/** Static SELECT column list shared by every read statement. */
 const LEDGER_COLUMNS =
-  'source, event_id, subject, captured_at, provider, model, tokens, estimated_amount, currency, unpriced'
-
-/** Column list for {@link UsageLedger.usagePage} rows, adding the 0002
- * token-dimension columns to {@link LEDGER_COLUMNS}. */
-const LEDGER_PAGE_COLUMNS = `${LEDGER_COLUMNS}, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens`
+  'source, event_id, subject, captured_at, provider, model, tokens, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, estimated_amount, currency, unpriced'
 
 /**
  * Build one static list statement for a fixed WHERE clause; parameters and
@@ -364,6 +356,11 @@ function toLedgerRow(row: UsageLedgerSqlRow): LedgerRow {
     provider: row.provider,
     model: row.model,
     tokens: row.tokens,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    cacheWriteTokens: row.cache_write_tokens,
+    reasoningTokens: row.reasoning_tokens,
     estimatedAmount: row.estimated_amount,
     currency: row.currency,
     unpriced: row.unpriced !== 0,
@@ -412,22 +409,6 @@ function decodePageCursor(cursor: string): { capturedAt: number, eventId: string
 }
 
 /**
- * Map one dimensioned SQL row to its public field naming.
- * @param row - usage_ledger row in SQL naming, dimensions included.
- * @returns the public row with unpriced back to boolean.
- */
-function toUsageRow(row: UsageLedgerDimSqlRow): LedgerRow {
-  return {
-    ...toLedgerRow(row),
-    inputTokens: row.input_tokens,
-    outputTokens: row.output_tokens,
-    cacheReadTokens: row.cache_read_tokens,
-    cacheWriteTokens: row.cache_write_tokens,
-    reasoningTokens: row.reasoning_tokens,
-  }
-}
-
-/**
  * Aggregate page stats over returned rows in JS (the CNY-only money rule
  * matches the SQL totals statement: unpriced rows never price and are
  * counted in unpricedCalls).
@@ -448,11 +429,11 @@ function statsOverRows(rows: LedgerRow[]): PageStats {
   }
   for (const row of rows) {
     stats.tokens += row.tokens
-    stats.inputTokens += row.inputTokens ?? 0
-    stats.outputTokens += row.outputTokens ?? 0
-    stats.cacheReadTokens += row.cacheReadTokens ?? 0
-    stats.cacheWriteTokens += row.cacheWriteTokens ?? 0
-    stats.reasoningTokens += row.reasoningTokens ?? 0
+    stats.inputTokens += row.inputTokens
+    stats.outputTokens += row.outputTokens
+    stats.cacheReadTokens += row.cacheReadTokens
+    stats.cacheWriteTokens += row.cacheWriteTokens
+    stats.reasoningTokens += row.reasoningTokens
     if (row.unpriced) stats.unpricedCalls += 1
     else if (row.currency === 'CNY') stats.estimatedAmountCny += row.estimatedAmount
   }
@@ -665,15 +646,15 @@ export class UsageLedger {
     }
     const effectiveLimit = clampLimit(query.limit)
     const rowsStatement = session.db.prepare(
-      `SELECT ${LEDGER_PAGE_COLUMNS}
+      `SELECT ${LEDGER_COLUMNS}
        FROM usage_ledger
        WHERE ${conditions.join(' AND ')}
        ORDER BY captured_at DESC, event_id DESC
        LIMIT ?`,
     )
     const rows = (
-      rowsStatement.all(...params, effectiveLimit) as unknown as UsageLedgerDimSqlRow[]
-    ).map(toUsageRow)
+      rowsStatement.all(...params, effectiveLimit) as unknown as UsageLedgerSqlRow[]
+    ).map(toLedgerRow)
     // Totals aggregate the same filter minus the cursor predicate (always
     // appended last): the cursor is a paging position, not a row filter,
     // and limit never applies either.
