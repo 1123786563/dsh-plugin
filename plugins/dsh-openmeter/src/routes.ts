@@ -8,9 +8,11 @@
  * identity → resolvable tenant policy → isOperator) before any OpenMeter call
  * or store read; with no seam the stock loopback-guarded behavior is unchanged.
  *
- * The tenant surfaces are /me/summary and /me/usage: any authenticated member
- * of a mapped tenant (no role requirement) reads only their own tenant's
- * data. They have no stock/loopback compatibility path — /me is meaningless
+ * The tenant surfaces are /me/summary, /me/usage, and /me/budget: any
+ * authenticated member of a mapped tenant (no role requirement) reads only
+ * their own tenant's data; the budget write additionally requires the
+ * tenant-manager role. They have no stock/loopback compatibility path — /me
+ * is meaningless
  * without an identity to scope to, so when no auth seam is wired (or its
  * identity source is absent at request time) they answer 401 unauthenticated
  * rather than serve tenant data unscoped.
@@ -19,11 +21,13 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { BudgetAmountError, loadBudgetForecast } from './budget.ts'
+import type { BudgetStore } from './budget.ts'
 import { guard, readJsonBody, writeJson } from './http.ts'
 import type { GuardedResponse } from './http.ts'
 import { LedgerQueryError } from './ledger.ts'
 import type { LedgerRow, UsageLedger, UsagePage, UsageQuery } from './ledger.ts'
-import { requireOperator, resolveTenantPolicy } from './tenant-policy.ts'
+import { requireOperator, requireTenantManager, resolveTenantPolicy } from './tenant-policy.ts'
 import type { PolicyError, TenantPolicy, TenantPolicyOptions } from './tenant-policy.ts'
 import { loadTenantSummary } from './tenant-summary.ts'
 import type { OpenMeterClient } from './openmeter.ts'
@@ -79,6 +83,12 @@ export interface RouteDeps {
    * answers 503 ledger-unavailable — the journal is never fabricated.
    */
   usageLedger?: Pick<UsageLedger, 'usagePage'>
+  /**
+   * Optional tenant-budget seam for /me/budget; omitted (or failing)
+   * answers 503 budget-unavailable — the budget row and its forecast
+   * are never fabricated.
+   */
+  budget?: Pick<BudgetStore, 'get' | 'set'>
 }
 
 /** One mounted route set's disposer. */
@@ -219,6 +229,8 @@ export function mountRoutes(webServer: WebServerLike, deps: RouteDeps): Disposer
   route('/api/openmeter/me/summary', (req, res) => handleMeSummary(req, res, deps))
 
   route('/api/openmeter/me/usage', (req, res) => handleMeUsage(req, res, deps))
+
+  route('/api/openmeter/me/budget', (req, res) => handleMeBudget(req, res, deps))
 
   return () => {
     for (const dispose of disposers.splice(0)) dispose()
@@ -544,6 +556,94 @@ async function handleMeUsage(req: IncomingMessage, res: ServerResponse, deps: Ro
     totals: page.totals,
     ...(page.cursor === undefined ? {} : { cursor: page.cursor }),
   })
+}
+
+/** Route-side monthly-budget cap in CNY; mirrors the store's own bound. */
+const BUDGET_MAX_CNY = 100_000_000
+
+/**
+ * Load and write the caller's budget forecast — 200 with the forecast
+ * spread after ok — or the opaque 503 when any seam read throws.
+ * @param res - the response.
+ * @param budget - the wired budget seam.
+ * @param ledger - the wired usage-ledger seam.
+ * @param policy - the resolved caller policy.
+ */
+function writeBudgetForecast(res: ServerResponse, budget: Pick<BudgetStore, 'get'>, ledger: Pick<UsageLedger, 'usagePage'>, policy: TenantPolicy): void {
+  try {
+    const forecast = loadBudgetForecast(
+      { tenantId: policy.tenantId, subject: policy.subject },
+      {
+        budgetStore: budget,
+        monthSpend: (subject, from, to) => {
+          const page = ledger.usagePage({ subject, from, to })
+          return {
+            estimatedAmountCny: page.totals.estimatedAmountCny,
+            calls: page.totals.calls,
+            unpricedCalls: page.totals.unpricedCalls,
+          }
+        },
+        now: () => Date.now(),
+      },
+    )
+    writeJson(res, 200, { ok: true, ...forecast })
+  } catch {
+    // Any read failure across the two seams — a closed budget store,
+    // sqlite, or the ledger — degrades to the same opaque 503; no
+    // internal error text reaches the client.
+    writeJson(res, 503, { ok: false, error: 'budget-unavailable' })
+  }
+}
+
+/**
+ * GET: the caller's own tenant budget forecast. PUT: set the monthly budget
+ * (tenant-manager role required), then answer the fresh forecast exactly
+ * like GET. The tenant and subject come only from the resolved policy; the
+ * body may carry `monthlyBudgetCny` alone — any other key, including
+ * tenantId/subject attempts, is rejected so client input can never name
+ * another tenant. Both seams are required up front: the response is a
+ * forecast, so spend data is needed even for a write. A load failure after
+ * a successful write still answers 503 budget-unavailable — the budget IS
+ * saved, the response is honestly unavailable.
+ */
+async function handleMeBudget(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
+  const auth = authorizeTenant(req, res, deps)
+  if (auth === null) return
+  if (req.method !== 'GET' && req.method !== 'PUT') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
+  const resolved = await resolveRequestPolicy(req, auth)
+  const policy = req.method === 'PUT' ? requireTenantManager(resolved) : resolved
+  if (!policy.ok) {
+    writePolicyError(res, policy)
+    return
+  }
+  const budget = deps.budget
+  const ledger = deps.usageLedger
+  if (budget === undefined || ledger === undefined) return writeJson(res, 503, { ok: false, error: 'budget-unavailable' })
+  if (req.method === 'PUT') {
+    let body: Record<string, unknown>
+    try {
+      body = asRecord(await readJsonBody(req))
+    } catch {
+      // readJsonBody throws only on an unreadable or oversized body or
+      // malformed JSON — all the client's fault, all invalid-body.
+      return writeJson(res, 400, { ok: false, error: 'invalid-body' })
+    }
+    for (const key of Object.keys(body)) {
+      if (key !== 'monthlyBudgetCny') return writeJson(res, 400, { ok: false, error: 'invalid-body' })
+    }
+    if (!Object.hasOwn(body, 'monthlyBudgetCny')) return writeJson(res, 400, { ok: false, error: 'invalid-body' })
+    const amount = body.monthlyBudgetCny
+    if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0 || amount > BUDGET_MAX_CNY) {
+      return writeJson(res, 400, { ok: false, error: 'invalid-amount' })
+    }
+    try {
+      budget.set(policy.tenantId, amount)
+    } catch (error) {
+      if (error instanceof BudgetAmountError) return writeJson(res, 400, { ok: false, error: 'invalid-amount' })
+      return writeJson(res, 503, { ok: false, error: 'budget-unavailable' })
+    }
+  }
+  writeBudgetForecast(res, budget, ledger, policy)
 }
 
 /**

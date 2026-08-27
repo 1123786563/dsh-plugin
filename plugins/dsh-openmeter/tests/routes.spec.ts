@@ -3,6 +3,7 @@ import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { BudgetStore } from '../src/budget.ts'
 import { resolveConfig } from '../src/config.ts'
 import { emptyState } from '../src/store.ts'
 import { UsageLedger } from '../src/ledger.ts'
@@ -42,6 +43,7 @@ const ROUTES = [
   '/api/openmeter/bindings',
   '/api/openmeter/me/summary',
   '/api/openmeter/me/usage',
+  '/api/openmeter/me/budget',
 ]
 
 /** The operator-maintained tenant → subject map used by the wired seam. */
@@ -964,6 +966,306 @@ describe('mountRoutes /me/usage tenant route', () => {
       expect(Object.hasOwn(body, 'cursor')).toBe(false)
     } finally {
       ledger.close()
+    }
+  })
+})
+
+/**
+ * The budget route's own matrix over a REAL budget store and REAL usage
+ * ledger (one mkdtemp dir, both sqlite files): GET is any mapped member's
+ * read, PUT is the tenant manager's write, and neither ever accepts a
+ * client-named tenant.
+ */
+describe('mountRoutes /me/budget tenant route', () => {
+  /** Subject map extended with a second tenant for cross-tenant isolation. */
+  const SUBJECTS_WITH_GLOBEX: Readonly<Record<string, string>> = { ...SUBJECTS, globex: 'cust-globex' }
+  /** A mapped member holding a non-manager role: read-allowed, write-forbidden. */
+  const MEMBER: RouteIdentity = { tenantId: 'acme', userId: 'alice', displayName: 'Alice', roles: ['member'] }
+  /** A mapped tenant manager (owner role): read- and write-allowed. */
+  const MANAGER: RouteIdentity = { tenantId: 'acme', userId: 'grace', displayName: 'Grace', roles: ['owner'] }
+  const GLOBEX_MEMBER: RouteIdentity = { tenantId: 'globex', userId: 'bob', displayName: 'Bob', roles: ['owner'] }
+
+  const BUDGET_PATH = '/api/openmeter/me/budget'
+
+  /** One ledger row captured now (in-month by construction), CNY-priced by default. */
+  function budgetRow(overrides: Partial<LedgerRow> = {}): LedgerRow {
+    return {
+      source: 'dsh-openmeter',
+      eventId: 'evt-1',
+      subject: 'cust-acme',
+      capturedAt: Date.now(),
+      provider: 'deepseek',
+      model: 'glm-5.3',
+      tokens: 150,
+      inputTokens: 100,
+      outputTokens: 40,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 3,
+      reasoningTokens: 2,
+      estimatedAmount: 0.0021,
+      currency: 'CNY',
+      unpriced: false,
+      ...overrides,
+    }
+  }
+
+  /** One fresh tmpdir holding both a real usage ledger and a real budget store. */
+  async function openBudgetStores(): Promise<{ ledger: UsageLedger, budgetStore: BudgetStore }> {
+    ledgerDir = await mkdtemp(join(tmpdir(), 'ombudget-'))
+    return { ledger: UsageLedger.open(ledgerDir), budgetStore: BudgetStore.open(ledgerDir) }
+  }
+
+  /**
+   * RouteDeps with the real seams wired; either may be omitted to pin the
+   * 503 path. Other collaborators stay the fakeDeps stubs.
+   */
+  function budgetDeps(auth: RouteAuth | undefined, budget?: Pick<BudgetStore, 'get' | 'set'>, usageLedger?: Pick<UsageLedger, 'usagePage'>): RouteDeps {
+    const { deps } = fakeDeps(auth)
+    return {
+      ...deps,
+      ...(budget === undefined ? {} : { budget }),
+      ...(usageLedger === undefined ? {} : { usageLedger }),
+    }
+  }
+
+  it('returns 401 unauthenticated for GET and PUT when no seam is wired or the identity source is absent', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      const noSeam = fakeWebServer()
+      mountRoutes(noSeam.webServer, budgetDeps(undefined, budgetStore, ledger))
+      const noSeamGet = await dispatch(noSeam.handlers, 'GET', BUDGET_PATH)
+      expect(noSeamGet.status).toBe(401)
+      expect(JSON.parse(noSeamGet.body)).toEqual({ ok: false, error: 'unauthenticated' })
+      const noSeamPut = await dispatch(noSeam.handlers, 'PUT', BUDGET_PATH, '{"monthlyBudgetCny":100}')
+      expect(noSeamPut.status).toBe(401)
+      expect(JSON.parse(noSeamPut.body)).toEqual({ ok: false, error: 'unauthenticated' })
+
+      const offline = fakeWebServer()
+      const offlineAuth: RouteAuth = { ...authSeam({ identity: MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), available: () => false }
+      mountRoutes(offline.webServer, budgetDeps(offlineAuth, budgetStore, ledger))
+      const offlineGet = await dispatch(offline.handlers, 'GET', BUDGET_PATH)
+      expect(offlineGet.status).toBe(401)
+      expect(JSON.parse(offlineGet.body)).toEqual({ ok: false, error: 'unauthenticated' })
+      expect(budgetStore.get('acme')).toBeNull()
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
+  it('returns 403 tenant-unmapped for an authenticated tenant absent from the mapping', async () => {
+    const server = fakeWebServer()
+    mountRoutes(server.webServer, budgetDeps(authSeam({ identity: GLOBEX_MEMBER, subjects: SUBJECTS })))
+    const result = await dispatch(server.handlers, 'GET', BUDGET_PATH)
+    expect(result.status).toBe(403)
+    expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'tenant-unmapped' })
+  })
+
+  it("serves a plain member their own ready forecast: own-tenant spend only, CNY basis, projection present", async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      budgetStore.set('acme', 100)
+      ledger.append(budgetRow({ eventId: 'a1' }))
+      ledger.append(budgetRow({ eventId: 'a2', estimatedAmount: 0.0042 }))
+      ledger.append(budgetRow({ eventId: 'g1', subject: 'cust-globex', estimatedAmount: 999 }))
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, ledger))
+      const result = await dispatch(server.handlers, 'GET', BUDGET_PATH)
+      expect(result.status).toBe(200)
+      const body = JSON.parse(result.body)
+      expect(body.ok).toBe(true)
+      expect(body.availability).toBe('ready')
+      expect(body.monthlyBudgetCny).toBe(100)
+      // Only the two cust-acme CNY rows count; the globex 999 never lands.
+      expect(body.monthToDateCny).toBeCloseTo(0.0063, 10)
+      expect(typeof body.projectedMonthEndCny).toBe('number')
+      expect(body.projectedOverageCny).toBe(0)
+      // Basis month bounds match the UTC calendar month of now.
+      const now = new Date()
+      const monthStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
+      const daysInMonth = (Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1) - monthStartMs) / 86_400_000
+      expect(body.basis).toMatchObject({ method: 'linear-daily-average', monthStartMs, daysInMonth, currency: 'CNY', spendSource: 'local-ledger-estimates' })
+      expect(body.basis.daysElapsed).toBeGreaterThanOrEqual(1)
+      expect(body.basis.daysElapsed).toBeLessThanOrEqual(daysInMonth)
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
+  it('PUT as manager persists the budget: response carries it, follow-up GET returns it, a fresh store sees it', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MANAGER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, ledger))
+      const before = await dispatch(server.handlers, 'GET', BUDGET_PATH)
+      expect(before.status).toBe(200)
+      expect(JSON.parse(before.body).availability).toBe('unconfigured')
+
+      const put = await dispatch(server.handlers, 'PUT', BUDGET_PATH, '{"monthlyBudgetCny":250}')
+      expect(put.status).toBe(200)
+      const putBody = JSON.parse(put.body)
+      expect(putBody.ok).toBe(true)
+      expect(putBody.monthlyBudgetCny).toBe(250)
+
+      const after = await dispatch(server.handlers, 'GET', BUDGET_PATH)
+      expect(after.status).toBe(200)
+      expect(JSON.parse(after.body).monthlyBudgetCny).toBe(250)
+
+      const reopened = BudgetStore.open(ledgerDir!)
+      try {
+        expect(reopened.get('acme')).toEqual({ amountCny: 250 })
+      } finally {
+        reopened.close()
+      }
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
+  it('rejects a member PUT with 403 forbidden and writes nothing', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, ledger))
+      const result = await dispatch(server.handlers, 'PUT', BUDGET_PATH, '{"monthlyBudgetCny":500}')
+      expect(result.status).toBe(403)
+      expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'forbidden' })
+      expect(budgetStore.get('acme')).toBeNull()
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
+  it('answers 400 invalid-amount for zero, negative, over-cap, non-number, and sub-分 amounts; nothing written', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MANAGER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, ledger))
+      const bodies = [
+        '{"monthlyBudgetCny":0}',
+        '{"monthlyBudgetCny":-5}',
+        '{"monthlyBudgetCny":100000000.01}',
+        '{"monthlyBudgetCny":"100"}',
+        // Passes the route range check; the store's 分 representation rejects it.
+        '{"monthlyBudgetCny":0.001}',
+      ]
+      for (const body of bodies) {
+        const result = await dispatch(server.handlers, 'PUT', BUDGET_PATH, body)
+        expect(result.status, body).toBe(400)
+        expect(JSON.parse(result.body), body).toEqual({ ok: false, error: 'invalid-amount' })
+      }
+      expect(budgetStore.get('acme')).toBeNull()
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
+  it('answers 400 invalid-body for malformed JSON, missing key, and cross-tenant keys; own budget unchanged', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      budgetStore.set('acme', 80)
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MANAGER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, ledger))
+      const bodies = [
+        '{oops',
+        '{}',
+        '{"monthlyBudgetCny":100,"tenantId":"other-tenant"}',
+        '{"monthlyBudgetCny":100,"subject":"steal"}',
+      ]
+      for (const body of bodies) {
+        const result = await dispatch(server.handlers, 'PUT', BUDGET_PATH, body)
+        expect(result.status, body).toBe(400)
+        expect(JSON.parse(result.body), body).toEqual({ ok: false, error: 'invalid-body' })
+      }
+      expect(budgetStore.get('acme')).toEqual({ amountCny: 80 })
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
+  it('answers 503 budget-unavailable when either seam is absent; a seamless PUT never writes', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      const noBudget = fakeWebServer()
+      mountRoutes(noBudget.webServer, budgetDeps(authSeam({ identity: MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), undefined, ledger))
+      const noBudgetGet = await dispatch(noBudget.handlers, 'GET', BUDGET_PATH)
+      expect(noBudgetGet.status).toBe(503)
+      expect(JSON.parse(noBudgetGet.body)).toEqual({ ok: false, error: 'budget-unavailable' })
+      // Manager so the role gate passes and the seam check is what answers.
+      const noBudgetPut = fakeWebServer()
+      mountRoutes(noBudgetPut.webServer, budgetDeps(authSeam({ identity: MANAGER, subjects: SUBJECTS_WITH_GLOBEX }), undefined, ledger))
+      const noBudgetPutResult = await dispatch(noBudgetPut.handlers, 'PUT', BUDGET_PATH, '{"monthlyBudgetCny":100}')
+      expect(noBudgetPutResult.status).toBe(503)
+      expect(JSON.parse(noBudgetPutResult.body)).toEqual({ ok: false, error: 'budget-unavailable' })
+
+      const noLedger = fakeWebServer()
+      mountRoutes(noLedger.webServer, budgetDeps(authSeam({ identity: MANAGER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, undefined))
+      const noLedgerGet = await dispatch(noLedger.handlers, 'GET', BUDGET_PATH)
+      expect(noLedgerGet.status).toBe(503)
+      expect(JSON.parse(noLedgerGet.body)).toEqual({ ok: false, error: 'budget-unavailable' })
+      const noLedgerPut = await dispatch(noLedger.handlers, 'PUT', BUDGET_PATH, '{"monthlyBudgetCny":100}')
+      expect(noLedgerPut.status).toBe(503)
+      expect(JSON.parse(noLedgerPut.body)).toEqual({ ok: false, error: 'budget-unavailable' })
+      // The budget seam was present and healthy, but no row was written.
+      expect(budgetStore.get('acme')).toBeNull()
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
+  it('answers 405 method-not-allowed for POST', async () => {
+    const server = fakeWebServer()
+    mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MEMBER, subjects: SUBJECTS_WITH_GLOBEX })))
+    const result = await dispatch(server.handlers, 'POST', BUDGET_PATH, '{}')
+    expect(result.status).toBe(405)
+    expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'method-not-allowed' })
+  })
+
+  it('GET with no budget row answers 200 unconfigured: spend and projection without fabricated budget fields', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      ledger.append(budgetRow({ eventId: 'a1' }))
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, ledger))
+      const result = await dispatch(server.handlers, 'GET', BUDGET_PATH)
+      expect(result.status).toBe(200)
+      const body = JSON.parse(result.body)
+      expect(body.ok).toBe(true)
+      expect(body.availability).toBe('unconfigured')
+      expect(body.monthToDateCny).toBeCloseTo(0.0021, 10)
+      expect(typeof body.projectedMonthEndCny).toBe('number')
+      expect(Object.hasOwn(body, 'monthlyBudgetCny')).toBe(false)
+      expect(Object.hasOwn(body, 'projectedOverageCny')).toBe(false)
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
+  it('GET with a budget but no metered calls this month answers 200 insufficient-history without a projection', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      budgetStore.set('acme', 60)
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, ledger))
+      const result = await dispatch(server.handlers, 'GET', BUDGET_PATH)
+      expect(result.status).toBe(200)
+      const body = JSON.parse(result.body)
+      expect(body.ok).toBe(true)
+      expect(body.availability).toBe('insufficient-history')
+      expect(body.monthlyBudgetCny).toBe(60)
+      expect(body.monthToDateCny).toBe(0)
+      expect(Object.hasOwn(body, 'projectedMonthEndCny')).toBe(false)
+      expect(Object.hasOwn(body, 'projectedOverageCny')).toBe(false)
+    } finally {
+      ledger.close()
+      budgetStore.close()
     }
   })
 })
