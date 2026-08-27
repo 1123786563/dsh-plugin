@@ -1219,6 +1219,40 @@ describe('mountRoutes /me/budget tenant route', () => {
     }
   })
 
+  it('PUT whose forecast load throws after a successful write answers 503 budget-unavailable and the budget stays saved', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      const throwingLedger: Pick<UsageLedger, 'usagePage'> = {
+        usagePage: () => {
+          throw new Error('ledger down')
+        },
+      }
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MANAGER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, throwingLedger))
+      const put = await dispatch(server.handlers, 'PUT', BUDGET_PATH, '{"monthlyBudgetCny":250}')
+      expect(put.status).toBe(503)
+      expect(JSON.parse(put.body)).toEqual({ ok: false, error: 'budget-unavailable' })
+      expect(put.body).not.toContain('ledger down')
+
+      // The write committed before the load failed: a fresh handle on the
+      // same directory sees the row the route wrote.
+      const reopened = BudgetStore.open(ledgerDir!)
+      try {
+        expect(reopened.get('acme')).toEqual({ amountCny: 250 })
+      } finally {
+        reopened.close()
+      }
+
+      // Read-side twin on the same throwing seam: opaque 503, GET included.
+      const getResult = await dispatch(server.handlers, 'GET', BUDGET_PATH)
+      expect(getResult.status).toBe(503)
+      expect(JSON.parse(getResult.body)).toEqual({ ok: false, error: 'budget-unavailable' })
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
   it('answers 405 method-not-allowed for POST', async () => {
     const server = fakeWebServer()
     mountRoutes(server.webServer, budgetDeps(authSeam({ identity: MEMBER, subjects: SUBJECTS_WITH_GLOBEX })))
