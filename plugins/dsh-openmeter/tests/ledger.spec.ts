@@ -242,7 +242,7 @@ describe('UsageLedger', () => {
     const probe = new DatabaseSync(join(target, 'usage-ledger.sqlite'))
     try {
       const applied = probe.prepare('SELECT COUNT(*) AS n FROM ledger_migrations').get() as { n: number }
-      expect(applied.n).toBe(1)
+      expect(applied.n).toBe(2)
     } finally {
       probe.close()
     }
