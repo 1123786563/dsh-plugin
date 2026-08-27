@@ -8,12 +8,12 @@
  * identity → resolvable tenant policy → isOperator) before any OpenMeter call
  * or store read; with no seam the stock loopback-guarded behavior is unchanged.
  *
- * The ONE tenant surface is /me/summary: any authenticated member of a mapped
- * tenant (no role requirement) reads only their own tenant's summary. It has
- * no stock/loopback compatibility path — /me is meaningless without an
- * identity to scope to, so when no auth seam is wired (or its identity source
- * is absent at request time) it answers 401 unauthenticated rather than serve
- * tenant data unscoped.
+ * The tenant surfaces are /me/summary and /me/usage: any authenticated member
+ * of a mapped tenant (no role requirement) reads only their own tenant's
+ * data. They have no stock/loopback compatibility path — /me is meaningless
+ * without an identity to scope to, so when no auth seam is wired (or its
+ * identity source is absent at request time) they answer 401 unauthenticated
+ * rather than serve tenant data unscoped.
  *
  * @module dsh-openmeter/routes
  */
@@ -21,6 +21,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { guard, readJsonBody, writeJson } from './http.ts'
 import type { GuardedResponse } from './http.ts'
+import { LedgerQueryError } from './ledger.ts'
+import type { LedgerRow, UsageLedger, UsagePage, UsageQuery } from './ledger.ts'
 import { requireOperator, resolveTenantPolicy } from './tenant-policy.ts'
 import type { PolicyError, TenantPolicy, TenantPolicyOptions } from './tenant-policy.ts'
 import { loadTenantSummary } from './tenant-summary.ts'
@@ -72,6 +74,11 @@ export interface RouteDeps {
   wal: MeteringWal
   /** Optional auth seam; omitted keeps the loopback-guarded stock behavior. */
   auth?: RouteAuth
+  /**
+   * Optional usage-ledger read seam for /me/usage; omitted (or failing)
+   * answers 503 ledger-unavailable — the journal is never fabricated.
+   */
+  usageLedger?: Pick<UsageLedger, 'usagePage'>
 }
 
 /** One mounted route set's disposer. */
@@ -210,6 +217,8 @@ export function mountRoutes(webServer: WebServerLike, deps: RouteDeps): Disposer
   route('/api/openmeter/bindings', (req, res) => handleBindings(req, res, deps))
 
   route('/api/openmeter/me/summary', (req, res) => handleMeSummary(req, res, deps))
+
+  route('/api/openmeter/me/usage', (req, res) => handleMeUsage(req, res, deps))
 
   return () => {
     for (const dispose of disposers.splice(0)) dispose()
@@ -386,6 +395,156 @@ async function handleMeSummary(req: IncomingMessage, res: ServerResponse, deps: 
     return
   }
   writeJson(res, 200, { ok: true, ...summary })
+}
+
+/** Route-side page-size ceiling for /me/usage (the ledger's own is 1000). */
+const USAGE_DETAIL_LIMIT_MAX = 100
+
+/** Page size served when /me/usage omits the limit parameter. */
+const USAGE_DETAIL_LIMIT_DEFAULT = 50
+
+/**
+ * One public usage-detail row: the ledger row minus its internal identity
+ * (source, eventId, subject), with the capture time under its client-facing
+ * name `at`. Token dimensions and the row's own money fields stay separate;
+ * the CNY-only estimate lives in the page/totals stats.
+ */
+interface UsageDetailRow {
+  at: number
+  provider: string
+  model: string
+  tokens: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
+  estimatedAmount: number
+  currency: string
+  unpriced: boolean
+}
+
+/** Strict parse outcome: the bounded ledger query fields, or the rejection. */
+type ParsedUsageQuery = { ok: true, query: Omit<UsageQuery, 'subject'> } | { ok: false, code: 'invalid-query' | 'subject-not-allowed' }
+
+/**
+ * Parse one strict integer query-string value: signed decimal digits only,
+ * then a safe-integer Number. No coercion — "1.5", "abc", and unsafe
+ * integers are all malformed.
+ * @param raw - the raw query-string value.
+ * @returns the parsed integer, or undefined when malformed.
+ */
+function parseIntegerParam(raw: string): number | undefined {
+  if (!/^-?\d+$/.test(raw)) return undefined
+  const value = Number(raw)
+  return Number.isSafeInteger(value) ? value : undefined
+}
+
+/**
+ * Parse the /me/usage query string: from/to must be integer epoch-ms
+ * strings, limit an integer clamped into 1..100 (default 50), model
+ * non-blank after trimming, cursor non-empty. A subject or tenantId
+ * parameter is rejected outright — the resolved policy is the only
+ * attribution source. Unknown parameters are ignored (forward-compat,
+ * matching the other routes' tolerance).
+ * @param url - the parsed request URL.
+ * @returns the bounded ledger query fields, or the typed rejection.
+ */
+function parseUsageQuery(url: URL): ParsedUsageQuery {
+  if (url.searchParams.has('subject') || url.searchParams.has('tenantId')) {
+    return { ok: false, code: 'subject-not-allowed' }
+  }
+  const query: Omit<UsageQuery, 'subject'> = {}
+  for (const bound of ['from', 'to'] as const) {
+    const raw = url.searchParams.get(bound)
+    if (raw === null) continue
+    const value = parseIntegerParam(raw)
+    if (value === undefined) return { ok: false, code: 'invalid-query' }
+    query[bound] = value
+  }
+  const limitRaw = url.searchParams.get('limit')
+  let limit = USAGE_DETAIL_LIMIT_DEFAULT
+  if (limitRaw !== null) {
+    const value = parseIntegerParam(limitRaw)
+    if (value === undefined) return { ok: false, code: 'invalid-query' }
+    limit = value
+  }
+  query.limit = Math.min(USAGE_DETAIL_LIMIT_MAX, Math.max(1, limit))
+  const model = url.searchParams.get('model')
+  if (model !== null) {
+    const trimmed = model.trim()
+    if (trimmed.length === 0) return { ok: false, code: 'invalid-query' }
+    query.model = trimmed
+  }
+  const cursor = url.searchParams.get('cursor')
+  if (cursor !== null) {
+    if (cursor.length === 0) return { ok: false, code: 'invalid-query' }
+    query.cursor = cursor
+  }
+  return { ok: true, query }
+}
+
+/**
+ * Map one ledger row to its public usage-detail payload row.
+ * @param row - the ledger row.
+ * @returns the public row with internal identity stripped.
+ */
+function toUsageDetailRow(row: LedgerRow): UsageDetailRow {
+  return {
+    at: row.capturedAt,
+    provider: row.provider,
+    model: row.model,
+    tokens: row.tokens,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    cacheReadTokens: row.cacheReadTokens,
+    cacheWriteTokens: row.cacheWriteTokens,
+    reasoningTokens: row.reasoningTokens,
+    estimatedAmount: row.estimatedAmount,
+    currency: row.currency,
+    unpriced: row.unpriced,
+  }
+}
+
+/**
+ * GET: the caller's own tenant usage journal from the durable ledger, paged
+ * and filtered. The subject comes only from the resolved policy; query
+ * parameters narrow time/model/page but never select a tenant. A missing
+ * ledger seam or a non-query ledger failure (sqlite, closed) answers 503
+ * ledger-unavailable with no internal error text; a malformed query answers
+ * 400. The route layer uses the real clock — paging is cursor-driven, so
+ * none is needed.
+ */
+async function handleMeUsage(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
+  const auth = authorizeTenant(req, res, deps)
+  if (auth === null) return
+  if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
+  const policy = await resolveRequestPolicy(req, auth)
+  if (!policy.ok) {
+    writePolicyError(res, policy)
+    return
+  }
+  const parsed = parseUsageQuery(new URL(req.url ?? '/', 'http://dsh.internal'))
+  if (!parsed.ok) return writeJson(res, 400, { ok: false, error: parsed.code })
+  const ledger = deps.usageLedger
+  if (ledger === undefined) return writeJson(res, 503, { ok: false, error: 'ledger-unavailable' })
+  let page: UsagePage
+  try {
+    page = ledger.usagePage({ subject: policy.subject, ...parsed.query })
+  } catch (error) {
+    // A malformed query the strict parse should have caught is still the
+    // client's 400 (defense-in-depth); every other ledger failure is a 503
+    // that names no internal detail.
+    if (error instanceof LedgerQueryError) return writeJson(res, 400, { ok: false, error: 'invalid-query' })
+    return writeJson(res, 503, { ok: false, error: 'ledger-unavailable' })
+  }
+  writeJson(res, 200, {
+    ok: true,
+    rows: page.rows.map(toUsageDetailRow),
+    page: page.page,
+    totals: page.totals,
+    ...(page.cursor === undefined ? {} : { cursor: page.cursor }),
+  })
 }
 
 /**

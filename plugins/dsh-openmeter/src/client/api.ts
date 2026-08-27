@@ -91,6 +91,53 @@ export interface SummaryPayload {
   asOf: number
 }
 
+/** One tenant usage-detail row (GET /api/openmeter/me/usage); `at` is the capture time. */
+export interface UsageDetailRow {
+  at: number
+  provider: string
+  model: string
+  tokens: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
+  estimatedAmount: number
+  currency: string
+  unpriced: boolean
+}
+
+/** Aggregates over the usage-detail rows; money is CNY-currency priced rows only. */
+export interface PageStats {
+  calls: number
+  tokens: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
+  estimatedAmountCny: number
+  unpricedCalls: number
+}
+
+/** Tenant usage-detail payload (GET /api/openmeter/me/usage); `cursor` present only when another page may exist. */
+export interface UsageDetailPayload {
+  ok: boolean
+  rows: UsageDetailRow[]
+  page: PageStats
+  totals: PageStats
+  cursor?: string
+}
+
+/** Filters for the usage-detail journal; undefined keys are omitted from the request. */
+export interface UsageDetailQuery {
+  from?: number
+  to?: number
+  model?: string
+  cursor?: string
+  limit?: number
+}
+
 /**
  * Fetch one JSON route.
  * @param path - the route path (relative).
@@ -127,4 +174,13 @@ export const api = {
     call('/api/openmeter/bindings', { method: 'POST', body: JSON.stringify({ presetId, customerKey }) }),
   /** GET the caller's own tenant credit summary. */
   summary: (): Promise<SummaryPayload> => call<SummaryPayload>('/api/openmeter/me/summary'),
+  /** GET the caller's own tenant usage journal, filtered and paged. */
+  usageDetail: (query: UsageDetailQuery = {}): Promise<UsageDetailPayload> => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined) params.set(key, String(value))
+    }
+    const queryString = params.size > 0 ? `?${params.toString()}` : ''
+    return call<UsageDetailPayload>(`/api/openmeter/me/usage${queryString}`)
+  },
 }

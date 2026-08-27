@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import { chmod, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { resolveConfig } from '../src/config.ts'
 import { emptyState } from '../src/store.ts'
+import { UsageLedger } from '../src/ledger.ts'
+import type { LedgerRow, UsageQuery } from '../src/ledger.ts'
 import { mountRoutes } from '../src/routes.ts'
 import type { RouteAuth, RouteDeps, RouteIdentity, WebServerLike } from '../src/routes.ts'
 import type { BalanceGate } from '../src/gate.ts'
@@ -12,6 +17,21 @@ import type { OperatorStore } from '../src/store.ts'
 import type { PriceEstimator } from '../src/estimator.ts'
 import type { MeteringWal } from '../src/wal.ts'
 
+let ledgerDir: string | undefined
+
+afterEach(async () => {
+  if (ledgerDir === undefined) return
+  await chmod(ledgerDir, 0o700).catch(() => {})
+  try {
+    await rm(ledgerDir, { recursive: true, force: true })
+  } catch (error) {
+    // Known macOS ENOTEMPTY tmpdir flake (repo-wide); one forced retry clears it.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw error
+    await rm(ledgerDir, { recursive: true, force: true })
+  }
+  ledgerDir = undefined
+})
+
 /** Every path mountRoutes registers. */
 const ROUTES = [
   '/api/openmeter/status',
@@ -21,6 +41,7 @@ const ROUTES = [
   '/api/openmeter/block',
   '/api/openmeter/bindings',
   '/api/openmeter/me/summary',
+  '/api/openmeter/me/usage',
 ]
 
 /** The operator-maintained tenant → subject map used by the wired seam. */
@@ -570,5 +591,333 @@ describe('mountRoutes /me/summary tenant route', () => {
       asOf: expect.any(Number),
     })
     expect(entitlementCalls).toEqual([['cust-globex', 'dsh_llm']])
+  })
+})
+
+/**
+ * The usage-detail route's own matrix over a REAL ledger (mkdtemp dir,
+ * rows appended, closed in finally): the ledger seam must answer exactly
+ * what UsageLedger.usagePage produces, scoped to the policy subject.
+ */
+describe('mountRoutes /me/usage tenant route', () => {
+  /** Subject map extended with a second tenant for cross-tenant isolation. */
+  const SUBJECTS_WITH_GLOBEX: Readonly<Record<string, string>> = { ...SUBJECTS, globex: 'cust-globex' }
+  const GLOBEX_MEMBER: RouteIdentity = { tenantId: 'globex', userId: 'bob', displayName: 'Bob', roles: [] }
+
+  const ZERO_STATS = {
+    calls: 0,
+    tokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    estimatedAmountCny: 0,
+    unpricedCalls: 0,
+  }
+
+  /** One ledger row; the default prices 0.0021 CNY over 100/40/5/3/2 dimensions. */
+  function ledgerRow(overrides: Partial<LedgerRow> = {}): LedgerRow {
+    return {
+      source: 'dsh-openmeter',
+      eventId: 'evt-1',
+      subject: 'cust-acme',
+      capturedAt: 100,
+      provider: 'deepseek',
+      model: 'glm-5.3',
+      tokens: 150,
+      inputTokens: 100,
+      outputTokens: 40,
+      cacheReadTokens: 5,
+      cacheWriteTokens: 3,
+      reasoningTokens: 2,
+      estimatedAmount: 0.0021,
+      currency: 'CNY',
+      unpriced: false,
+      ...overrides,
+    }
+  }
+
+  async function openUsageLedger(): Promise<UsageLedger> {
+    ledgerDir = await mkdtemp(join(tmpdir(), 'omroutes-'))
+    return UsageLedger.open(ledgerDir)
+  }
+
+  /** Wrap one ledger so every usagePage query is recorded before delegating. */
+  function recordingLedger(ledger: UsageLedger, queries: UsageQuery[]): Pick<UsageLedger, 'usagePage'> {
+    return {
+      usagePage: query => {
+        queries.push(query)
+        return ledger.usagePage(query)
+      },
+    }
+  }
+
+  /**
+   * RouteDeps with the real ledger wired as the usage seam; other
+   * collaborators stay the fakeDeps stubs (the route never touches them).
+   */
+  function usageDeps(auth: RouteAuth | undefined, usageLedger?: Pick<UsageLedger, 'usagePage'>): RouteDeps {
+    const { deps } = fakeDeps(auth)
+    return { ...deps, ...(usageLedger === undefined ? {} : { usageLedger }) }
+  }
+
+  it('returns 401 unauthenticated with no seam wired and when the identity source is absent (stock path never serves tenant data)', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'a1' }))
+      const noSeam = fakeWebServer()
+      mountRoutes(noSeam.webServer, usageDeps(undefined, ledger))
+      const noSeamResult = await dispatch(noSeam.handlers, 'GET', '/api/openmeter/me/usage')
+      expect(noSeamResult.status).toBe(401)
+      expect(JSON.parse(noSeamResult.body)).toEqual({ ok: false, error: 'unauthenticated' })
+
+      const offline = fakeWebServer()
+      const offlineAuth: RouteAuth = { ...authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), available: () => false }
+      mountRoutes(offline.webServer, usageDeps(offlineAuth, ledger))
+      const offlineResult = await dispatch(offline.handlers, 'GET', '/api/openmeter/me/usage')
+      expect(offlineResult.status).toBe(401)
+      expect(JSON.parse(offlineResult.body)).toEqual({ ok: false, error: 'unauthenticated' })
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('returns 403 tenant-unmapped for an authenticated tenant absent from the mapping', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'g1', subject: 'cust-globex' }))
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, usageDeps(authSeam({ identity: GLOBEX_MEMBER, subjects: SUBJECTS })))
+      const result = await dispatch(server.handlers, 'GET', '/api/openmeter/me/usage')
+      expect(result.status).toBe(403)
+      expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'tenant-unmapped' })
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it("serves a mapped member their own filtered journal: full row fields, page vs totals, policy-bound subject", async () => {
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'a1', capturedAt: 100 }))
+      ledger.append(ledgerRow({ eventId: 'a2', capturedAt: 200, model: 'glm-5.3-mini' }))
+      ledger.append(ledgerRow({ eventId: 'a3', capturedAt: 300, estimatedAmount: 0.5, currency: 'USD', unpriced: true }))
+      ledger.append(ledgerRow({ eventId: 'g1', capturedAt: 150, subject: 'cust-globex', tokens: 999 }))
+      const queries: UsageQuery[] = []
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, usageDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), recordingLedger(ledger, queries)))
+      const result = await dispatch(server.handlers, 'GET', '/api/openmeter/me/usage?from=100&to=300&model=glm-5.3&limit=1')
+      expect(result.status).toBe(200)
+      const body = JSON.parse(result.body)
+      // One full row: five token dimensions, money fields, unpriced flag.
+      expect(body.rows).toEqual([{
+        at: 300,
+        provider: 'deepseek',
+        model: 'glm-5.3',
+        tokens: 150,
+        inputTokens: 100,
+        outputTokens: 40,
+        cacheReadTokens: 5,
+        cacheWriteTokens: 3,
+        reasoningTokens: 2,
+        estimatedAmount: 0.5,
+        currency: 'USD',
+        unpriced: true,
+      }])
+      // Row identity stays internal: no source/eventId/subject keys.
+      for (const key of ['source', 'eventId', 'subject']) {
+        expect(Object.hasOwn(body.rows[0], key)).toBe(false)
+      }
+      // page aggregates only the returned row; totals the whole filtered set.
+      expect(body.page).toEqual({ calls: 1, tokens: 150, inputTokens: 100, outputTokens: 40, cacheReadTokens: 5, cacheWriteTokens: 3, reasoningTokens: 2, estimatedAmountCny: 0, unpricedCalls: 1 })
+      expect(body.totals).toEqual({ calls: 2, tokens: 300, inputTokens: 200, outputTokens: 80, cacheReadTokens: 10, cacheWriteTokens: 6, reasoningTokens: 4, estimatedAmountCny: 0.0021, unpricedCalls: 1 })
+      // A full page carries the opaque cursor.
+      expect(typeof body.cursor).toBe('string')
+      // The ledger query is bound to the policy subject with the parsed filters.
+      expect(queries).toEqual([{ subject: 'cust-acme', from: 100, to: 300, model: 'glm-5.3', limit: 1 }])
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('answers 400 invalid-query for malformed values (strict, no coercion) while integer limits still clamp', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'a1' }))
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, usageDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), ledger))
+      const malformed = [
+        '?from=abc',
+        '?from=1.5',
+        '?to=NaN',
+        '?limit=abc',
+        '?model=%20%20',
+        '?cursor=',
+        '?from=9007199254740993',
+      ]
+      for (const query of malformed) {
+        const result = await dispatch(server.handlers, 'GET', `/api/openmeter/me/usage${query}`)
+        expect(result.status, query).toBe(400)
+        expect(JSON.parse(result.body), query).toEqual({ ok: false, error: 'invalid-query' })
+      }
+      // Integer out-of-range limits clamp (never 400): -5 floors to 1.
+      const clamped = await dispatch(server.handlers, 'GET', '/api/openmeter/me/usage?limit=-5')
+      expect(clamped.status).toBe(200)
+      expect(JSON.parse(clamped.body).rows).toHaveLength(1)
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('answers 400 subject-not-allowed when a subject or tenantId parameter is present, even empty', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'a1' }))
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, usageDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), ledger))
+      for (const query of ['?subject=cust-globex', '?tenantId=globex', '?subject=']) {
+        const result = await dispatch(server.handlers, 'GET', `/api/openmeter/me/usage${query}`)
+        expect(result.status, query).toBe(400)
+        expect(JSON.parse(result.body), query).toEqual({ ok: false, error: 'subject-not-allowed' })
+      }
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('isolates tenants: each member reads only their own rows and totals; spoofed parameters never widen the scope', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'a1', capturedAt: 100, tokens: 10 }))
+      ledger.append(ledgerRow({ eventId: 'a2', capturedAt: 300, tokens: 20 }))
+      ledger.append(ledgerRow({ eventId: 'g1', capturedAt: 200, subject: 'cust-globex', tokens: 200 }))
+      ledger.append(ledgerRow({ eventId: 'g2', capturedAt: 400, subject: 'cust-globex', tokens: 400 }))
+      const acme = fakeWebServer()
+      mountRoutes(acme.webServer, usageDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), ledger))
+      const acmeResult = await dispatch(acme.handlers, 'GET', '/api/openmeter/me/usage')
+      expect(acmeResult.status).toBe(200)
+      const acmeBody = JSON.parse(acmeResult.body)
+      expect(acmeBody.rows.map((row: { at: number }) => row.at)).toEqual([300, 100])
+      // Money sums accumulate as floats, so the CNY field is asserted by
+      // closeness (ledger-query.spec.ts precedent); every integer field is pinned.
+      expect(acmeBody.totals).toMatchObject({ calls: 2, tokens: 30, inputTokens: 200, outputTokens: 80, cacheReadTokens: 10, cacheWriteTokens: 6, reasoningTokens: 4, unpricedCalls: 0 })
+      expect(acmeBody.totals.estimatedAmountCny).toBeCloseTo(0.0042, 10)
+
+      const globex = fakeWebServer()
+      mountRoutes(globex.webServer, usageDeps(authSeam({ identity: GLOBEX_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), ledger))
+      const globexResult = await dispatch(globex.handlers, 'GET', '/api/openmeter/me/usage')
+      expect(globexResult.status).toBe(200)
+      const globexBody = JSON.parse(globexResult.body)
+      expect(globexBody.rows.map((row: { at: number }) => row.at)).toEqual([400, 200])
+      expect(globexBody.totals).toMatchObject({ calls: 2, tokens: 600, inputTokens: 200, outputTokens: 80, cacheReadTokens: 10, cacheWriteTokens: 6, reasoningTokens: 4, unpricedCalls: 0 })
+      expect(globexBody.totals.estimatedAmountCny).toBeCloseTo(0.0042, 10)
+
+      // Spoofed scope selectors: unknown params are ignored, identity-named
+      // ones are rejected — neither ever changes the acme scope.
+      const ignored = await dispatch(acme.handlers, 'GET', '/api/openmeter/me/usage?tenant=globex&foo=1')
+      expect(ignored.status).toBe(200)
+      expect(JSON.parse(ignored.body).totals.tokens).toBe(30)
+      const rejected = await dispatch(acme.handlers, 'GET', '/api/openmeter/me/usage?subject=cust-globex')
+      expect(rejected.status).toBe(400)
+      expect(JSON.parse(rejected.body)).toEqual({ ok: false, error: 'subject-not-allowed' })
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('walks the full journal by cursor: every row exactly once, totals constant, no cursor on the last page', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      for (let i = 1; i <= 5; i++) {
+        ledger.append(ledgerRow({ eventId: `e${i}`, capturedAt: i * 100, tokens: i }))
+      }
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, usageDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), ledger))
+      const seen: number[] = []
+      let query = '/api/openmeter/me/usage?limit=2'
+      for (let page = 1; page <= 3; page++) {
+        const result = await dispatch(server.handlers, 'GET', query)
+        expect(result.status, `page ${page}`).toBe(200)
+        const body = JSON.parse(result.body)
+        seen.push(...body.rows.map((row: { at: number }) => row.at))
+        expect(body.rows, `page ${page}`).toHaveLength(page < 3 ? 2 : 1)
+        expect(body.totals, `page ${page}`).toMatchObject({ calls: 5, tokens: 15, inputTokens: 500, outputTokens: 200, cacheReadTokens: 25, cacheWriteTokens: 15, reasoningTokens: 10, unpricedCalls: 0 })
+        expect(body.totals.estimatedAmountCny, `page ${page}`).toBeCloseTo(0.0105, 10)
+        if (page < 3) {
+          expect(typeof body.cursor, `page ${page}`).toBe('string')
+          query = `/api/openmeter/me/usage?limit=2&cursor=${body.cursor}`
+        } else {
+          expect(Object.hasOwn(body, 'cursor'), 'last page').toBe(false)
+        }
+      }
+      expect(seen).toEqual([500, 400, 300, 200, 100])
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('answers 503 ledger-unavailable with no ledger wired, a throwing ledger, or a closed ledger — never leaking error text', async () => {
+    const acme = authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX })
+    const missing = fakeWebServer()
+    mountRoutes(missing.webServer, usageDeps(acme))
+    const missingResult = await dispatch(missing.handlers, 'GET', '/api/openmeter/me/usage')
+    expect(missingResult.status).toBe(503)
+    expect(JSON.parse(missingResult.body)).toEqual({ ok: false, error: 'ledger-unavailable' })
+
+    const throwing = fakeWebServer()
+    mountRoutes(throwing.webServer, usageDeps(acme, {
+      usagePage: () => {
+        throw new Error('sqlite boom')
+      },
+    }))
+    const throwingResult = await dispatch(throwing.handlers, 'GET', '/api/openmeter/me/usage')
+    expect(throwingResult.status).toBe(503)
+    expect(JSON.parse(throwingResult.body)).toEqual({ ok: false, error: 'ledger-unavailable' })
+    expect(throwingResult.body).not.toContain('sqlite boom')
+
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'a1' }))
+      ledger.close()
+      const closed = fakeWebServer()
+      mountRoutes(closed.webServer, usageDeps(acme, ledger))
+      const closedResult = await dispatch(closed.handlers, 'GET', '/api/openmeter/me/usage')
+      expect(closedResult.status).toBe(503)
+      expect(JSON.parse(closedResult.body)).toEqual({ ok: false, error: 'ledger-unavailable' })
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('answers 405 method-not-allowed for POST without touching the ledger', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      ledger.append(ledgerRow({ eventId: 'a1' }))
+      const queries: UsageQuery[] = []
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, usageDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), recordingLedger(ledger, queries)))
+      const result = await dispatch(server.handlers, 'POST', '/api/openmeter/me/usage', '{}')
+      expect(result.status).toBe(405)
+      expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'method-not-allowed' })
+      expect(queries).toEqual([])
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('answers 200 with empty rows and all-zero stats for a mapped member with an empty ledger', async () => {
+    const ledger = await openUsageLedger()
+    try {
+      const server = fakeWebServer()
+      mountRoutes(server.webServer, usageDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), ledger))
+      const result = await dispatch(server.handlers, 'GET', '/api/openmeter/me/usage')
+      expect(result.status).toBe(200)
+      const body = JSON.parse(result.body)
+      expect(body).toEqual({ ok: true, rows: [], page: ZERO_STATS, totals: ZERO_STATS })
+      expect(Object.hasOwn(body, 'cursor')).toBe(false)
+    } finally {
+      ledger.close()
+    }
   })
 })
