@@ -2,10 +2,11 @@
  * dsh-openmeter: OpenMeter billing for DeepSeek Harness.
  *
  * Host half: the metering pipeline (llm/stream gate + session/event durable
- * metering), the WAL-backed at-least-once forwarder, the balance gate with
- * governance cache, the llm-cost price cache, the cashier/panel HTTP routes,
- * and the openmeter settings namespace. Unreachable OpenMeter never blocks
- * model calls (fail-open, ADR-0003); usage queues on the WAL (ADR-0002).
+ * metering into the WAL and its local usage-ledger mirror), the WAL-backed
+ * at-least-once forwarder, the balance gate with governance cache, the
+ * llm-cost price cache, the cashier/panel HTTP routes, and the openmeter
+ * settings namespace. Unreachable OpenMeter never blocks model calls
+ * (fail-open, ADR-0003); usage queues on the WAL (ADR-0002).
  *
  * @module dsh-openmeter
  */
@@ -23,6 +24,7 @@ import { resolveDshHome } from './dsh-home.ts'
 import { PriceEstimator } from './estimator.ts'
 import { Forwarder } from './forwarder.ts'
 import { BalanceGate } from './gate.ts'
+import { UsageLedger } from './ledger.ts'
 import { mountRoutes } from './routes.ts'
 import type { RouteAuth, RouteIdentity, WebServerLike } from './routes.ts'
 import { MeteringPipeline } from './pipeline.ts'
@@ -50,11 +52,14 @@ export {
   OpenMeterClient,
   OperatorStore,
   PriceEstimator,
+  UsageLedger,
   mountRoutes,
   resolveConfig,
   resolveDshHome,
 }
 export { BlockError } from './pipeline.ts'
+export { LedgerRowError } from './ledger.ts'
+export type { AppendOutcome, LedgerQuery, LedgerRow } from './ledger.ts'
 export { billedInputTokens, buildWalRecord, meteredTokens } from './cloudevent.ts'
 
 /**
@@ -73,6 +78,7 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
   const dir = current.dataDir.length > 0 ? current.dataDir : join(resolveDshHome(process.env), 'openmeter')
 
   const wal = new MeteringWal(dir)
+  const usageLedger = UsageLedger.open(dir)
   const store = new OperatorStore(dir)
   const client = new OpenMeterClient(getConfig)
   const estimator = new PriceEstimator(() => client, () => current.quoteCurrency)
@@ -90,6 +96,7 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
     wal,
     gate,
     estimator,
+    usageLedger,
     getConfig,
     sessions: () => sessions,
     presetSubject: presetId => store.subjectFor(presetId, current.houseSubject),

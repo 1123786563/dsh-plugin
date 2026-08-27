@@ -11,14 +11,20 @@
  *   message.source. Dedupe by (sessionId, seq) because the emit feed is
  *   at-least-once.
  *
+ * Each metered event goes to the WAL first (the authoritative at-least-once
+ * seam), then to the durable usage ledger (the local estimate/display
+ * mirror, best effort — its failure never breaks metering), then to the
+ * in-memory estimate ring.
+ *
  * @module dsh-openmeter/pipeline
  */
 
-import { billedInputTokens, buildWalRecord } from './cloudevent.ts'
+import { billedInputTokens, buildWalRecord, meteredTokens } from './cloudevent.ts'
 import type { CallUsage, MeteredCall, WalRecord } from './cloudevent.ts'
 import type { Config } from './config.ts'
 import type { BalanceGate } from './gate.ts'
-import type { PriceEstimator } from './estimator.ts'
+import type { Estimate, PriceEstimator } from './estimator.ts'
+import type { UsageLedger } from './ledger.ts'
 import type { SessionsLike, StreamOptionsLike, StreamChunkLike, SessionEventLike } from './types.ts'
 import type { MeteringWal } from './wal.ts'
 
@@ -65,6 +71,7 @@ export class MeteringPipeline {
   private readonly wal: MeteringWal
   private readonly gate: BalanceGate
   private readonly estimator: PriceEstimator
+  private readonly usageLedger: Pick<UsageLedger, 'append'> | undefined
   private readonly getConfig: () => Config
   private readonly sessions: () => SessionsLike | undefined
   private readonly presetSubject: (presetId: string | undefined) => string
@@ -80,6 +87,8 @@ export class MeteringPipeline {
     wal: MeteringWal
     gate: BalanceGate
     estimator: PriceEstimator
+    /** Durable usage ledger mirror; omitted by consumers that only forward. */
+    usageLedger?: Pick<UsageLedger, 'append'>
     getConfig: () => Config
     sessions: () => SessionsLike | undefined
     presetSubject: (presetId: string | undefined) => string
@@ -88,6 +97,7 @@ export class MeteringPipeline {
     this.wal = deps.wal
     this.gate = deps.gate
     this.estimator = deps.estimator
+    this.usageLedger = deps.usageLedger
     this.getConfig = deps.getConfig
     this.sessions = deps.sessions
     this.presetSubject = deps.presetSubject
@@ -162,7 +172,8 @@ export class MeteringPipeline {
   }
 
   /**
-   * Meter one committed assistant message (dedupe + WAL + recent ring).
+   * Meter one committed assistant message (dedupe + WAL + ledger mirror +
+   * estimate ring).
    * @param input - everything known about the committed call.
    */
   private async meter(input: {
@@ -197,17 +208,52 @@ export class MeteringPipeline {
       capturedAt: input.time,
     }
     const record = buildWalRecord(call, config.eventType, config.eventSource)
+    const estimate = this.estimator.estimate(record.event.data)
     await this.wal.append(record)
-    this.pushRecent(call, record)
+    this.appendLedger(config, call, record, estimate)
+    this.pushRecent(call, estimate)
+  }
+
+  /**
+   * Mirror one metered event into the durable usage ledger (the local
+   * estimate/display source). A duplicate append is an acknowledged event.
+   * Best effort: the WAL already holds the authoritative record, so a ledger
+   * failure is swallowed and never breaks metering.
+   * @param config - config snapshot at meter time (source of the row's source).
+   * @param call - the metered call (subject attribution and capture time).
+   * @param record - the WAL record built for it (event id join key).
+   * @param estimate - the estimate shared with the recent ring.
+   */
+  private appendLedger(config: Config, call: MeteredCall, record: WalRecord, estimate: Estimate): void {
+    if (this.usageLedger === undefined) return
+    try {
+      this.usageLedger.append({
+        source: config.eventSource,
+        eventId: record.event.id,
+        subject: call.subject,
+        capturedAt: call.capturedAt,
+        provider: call.provider,
+        model: call.model,
+        tokens: meteredTokens(call.usage),
+        estimatedAmount: estimate.amount,
+        currency: estimate.currency,
+        unpriced: estimate.unpriced,
+      })
+    } catch {
+      // Swallow: LedgerRowError (a row the pipeline itself malformed) and
+      // node:sqlite runtime failures — the ledger is the estimate/display
+      // mirror and the WAL already carries the authoritative event, so
+      // metering must not fail because the mirror could not be written
+      // (OperatorStore.save takes the same stance).
+    }
   }
 
   /**
    * Push one estimate row into the ring.
    * @param call - the metered call.
-   * @param record - the WAL record built for it.
+   * @param estimate - the estimate computed once per metered call.
    */
-  private pushRecent(call: MeteredCall, record: WalRecord): void {
-    const estimate = this.estimator.estimate(record.event.data)
+  private pushRecent(call: MeteredCall, estimate: Estimate): void {
     this.recent.unshift({
       ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }),
       subject: call.subject,
