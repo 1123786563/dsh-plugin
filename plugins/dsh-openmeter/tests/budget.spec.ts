@@ -29,6 +29,16 @@ const NOW_AUG_10 = Date.UTC(2026, 7, 10)
 const AUG_START = Date.UTC(2026, 7, 1)
 /** Inclusive UTC month end: 2026-09-01T00:00:00.000Z minus 1 ms. */
 const AUG_END = Date.UTC(2026, 8, 1) - 1
+/** 2026-02-28T00:00:00.000Z: last day of a 28-day (non-leap) February. */
+const NOW_FEB_28 = Date.UTC(2026, 1, 28)
+/** UTC bounds of that February: 2026-02-01T00:00:00.000Z .. 2026-03-01T00:00:00.000Z − 1. */
+const FEB_START = Date.UTC(2026, 1, 1)
+const FEB_END = Date.UTC(2026, 2, 1) - 1
+/** 2026-09-15T12:00:00.000Z: mid-month noon of a 30-day month, so daysElapsed is 15 of 30. */
+const NOW_SEP_15 = Date.UTC(2026, 8, 15, 12)
+/** UTC bounds of that September: 2026-09-01T00:00:00.000Z .. 2026-10-01T00:00:00.000Z − 1. */
+const SEP_START = Date.UTC(2026, 8, 1)
+const SEP_END = Date.UTC(2026, 9, 1) - 1
 
 let dir: string | undefined
 
@@ -174,6 +184,66 @@ describe('BudgetStore', () => {
       try {
         const row = probe.prepare('SELECT COUNT(*) AS total FROM tenant_budget').get() as { total: number }
         expect(row.total).toBe(0)
+      } finally {
+        probe.close()
+      }
+    } finally {
+      store.close()
+    }
+  })
+
+  it('rejects sub-分 amounts as typed client errors, leaking no raw CHECK text', async () => {
+    const store = await openBudget()
+    try {
+      // Opens the database without writing any row.
+      expect(store.get('acme')).toBeNull()
+      // Every double below 0.005 has no 分 representation: Math.round(x*100) < 1.
+      for (const amountCny of [0.001, 0.004, 0.004999999999999999]) {
+        try {
+          store.set('acme', amountCny)
+          expect.unreachable(`expected BudgetAmountError for ${amountCny}`)
+        } catch (error) {
+          expect(error).toBeInstanceOf(BudgetAmountError)
+          expect((error as BudgetAmountError).message).toContain('amountCny')
+          // The guard is load-bearing: without it the STRICT CHECK constraint
+          // would surface as raw SQLite error text across this public API.
+          expect((error as BudgetAmountError).message).not.toContain('CHECK')
+        }
+      }
+      const probe = new DatabaseSync(join(dir!, 'budget.sqlite'))
+      try {
+        const row = probe.prepare('SELECT COUNT(*) AS total FROM tenant_budget').get() as { total: number }
+        expect(row.total).toBe(0)
+      } finally {
+        probe.close()
+      }
+    } finally {
+      store.close()
+    }
+  })
+
+  it('accepts 0.005 CNY as the 1-分 floor and stores Math.round(x * 100) 分', async () => {
+    const store = await openBudget()
+    try {
+      // The smallest amount with a 分 representation: 0.005*100 rounds to 1.
+      store.set('min', 0.005)
+      expect(store.get('min')).toEqual({ amountCny: 0.01 })
+      // Float reality of the documented rule: 1.005*100 = 100.49999999999999 → 100 分.
+      store.set('float', 1.005)
+      expect(store.get('float')).toEqual({ amountCny: 1 })
+      // 0.29*100 = 28.999999999999996 → 29 分, not 28.
+      store.set('cent', 0.29)
+      expect(store.get('cent')).toEqual({ amountCny: 0.29 })
+      const probe = new DatabaseSync(join(dir!, 'budget.sqlite'))
+      try {
+        const rows = probe
+          .prepare('SELECT tenant_id, amount_minor FROM tenant_budget ORDER BY tenant_id')
+          .all() as Array<{ tenant_id: string, amount_minor: number }>
+        expect(rows).toEqual([
+          { tenant_id: 'cent', amount_minor: 29 },
+          { tenant_id: 'float', amount_minor: 100 },
+          { tenant_id: 'min', amount_minor: 1 },
+        ])
       } finally {
         probe.close()
       }
@@ -394,6 +464,55 @@ describe('loadBudgetForecast', () => {
       )
       expect(under.projectedMonthEndCny).toBeCloseTo(155, 10)
       expect(under.projectedOverageCny).toBe(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('ready: a 28-day February month-end pins daysInMonth 28, not 31', async () => {
+    const store = await openBudget()
+    try {
+      store.set('acme', 100)
+      const spend = fakeMonthSpend({ estimatedAmountCny: 28, calls: 4, unpricedCalls: 0 })
+      const result = loadBudgetForecast(
+        { tenantId: 'acme', subject: 'subj-acme' },
+        { budgetStore: store, monthSpend: spend.monthSpend, now: () => NOW_FEB_28 },
+      )
+      const ready = asReady(result)
+      expect(ready.monthToDateCny).toBe(28)
+      // Contract formula: (28 CNY / 28 elapsed days) * 28 days = 28 CNY.
+      expect(ready.projectedMonthEndCny).toBeCloseTo((28 / 28) * 28, 10)
+      // The projection stays under the 100 CNY budget: clamp at exactly 0.
+      expect(ready.projectedOverageCny).toBe(0)
+      expect(ready.basis.daysInMonth).toBe(28)
+      expect(ready.basis.daysElapsed).toBe(28)
+      expect(ready.basis.monthStartMs).toBe(FEB_START)
+      expect(ready.basis.monthEndMs).toBe(FEB_END)
+      expect(spend.calls).toEqual([{ subject: 'subj-acme', from: FEB_START, to: FEB_END }])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('unconfigured: a 30-day September mid-month projects (30 / 15) * 30 = 60', async () => {
+    const store = await openBudget()
+    try {
+      const spend = fakeMonthSpend({ estimatedAmountCny: 30, calls: 2, unpricedCalls: 0 })
+      const result = loadBudgetForecast(
+        { tenantId: 'acme', subject: 'subj-acme' },
+        { budgetStore: store, monthSpend: spend.monthSpend, now: () => NOW_SEP_15 },
+      )
+      const unconfigured = asUnconfigured(result)
+      expect(unconfigured.monthToDateCny).toBe(30)
+      // Contract formula: (30 CNY / 15 elapsed days) * 30 days = 60 CNY.
+      expect(unconfigured.projectedMonthEndCny).toBeCloseTo((30 / 15) * 30, 10)
+      expect('monthlyBudgetCny' in unconfigured).toBe(false)
+      expect('projectedOverageCny' in unconfigured).toBe(false)
+      expect(unconfigured.basis.daysInMonth).toBe(30)
+      expect(unconfigured.basis.daysElapsed).toBe(15)
+      expect(unconfigured.basis.monthStartMs).toBe(SEP_START)
+      expect(unconfigured.basis.monthEndMs).toBe(SEP_END)
+      expect(spend.calls).toEqual([{ subject: 'subj-acme', from: SEP_START, to: SEP_END }])
     } finally {
       store.close()
     }
