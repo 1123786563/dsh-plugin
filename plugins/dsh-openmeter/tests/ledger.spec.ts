@@ -3,8 +3,8 @@ import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { LedgerRowError, UsageLedger } from '../src/ledger.ts'
-import type { LedgerRow } from '../src/ledger.ts'
+import { LEDGER_LIMIT_DEFAULT, LedgerQueryError, LedgerRowError, UsageLedger } from '../src/ledger.ts'
+import type { LedgerQuery, LedgerRow } from '../src/ledger.ts'
 
 let dir: string | undefined
 
@@ -88,6 +88,8 @@ describe('UsageLedger', () => {
         { field: 'eventId', row: row({ eventId: '' }) },
         { field: 'tokens', row: row({ tokens: -1 }) },
         { field: 'estimatedAmount', row: row({ estimatedAmount: Number.NaN }) },
+        { field: 'capturedAt', row: row({ capturedAt: 1_700_000_000_000.5 }) },
+        { field: 'capturedAt', row: row({ capturedAt: Number.MAX_SAFE_INTEGER + 1 }) },
       ]
       for (const candidate of invalid) {
         try {
@@ -99,6 +101,48 @@ describe('UsageLedger', () => {
         }
       }
       expect(ledger.stats().total).toBe(0)
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('round-trips unpriced: true as true', async () => {
+    const ledger = await openLedger()
+    try {
+      expect(ledger.append(row({ unpriced: true }))).toBe('inserted')
+      const rows = ledger.list({ subject: 'tenant-a' })
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.unpriced).toBe(true)
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('rejects malformed list queries with LedgerQueryError before SQL runs', async () => {
+    const ledger = await openLedger()
+    try {
+      ledger.append(row())
+      const invalid: Array<{ field: string, query: LedgerQuery }> = [
+        { field: 'from', query: { subject: 'tenant-a', from: '1000' as unknown as number } },
+        { field: 'from', query: { subject: 'tenant-a', from: 'abc' as unknown as number } },
+        { field: 'from', query: { subject: 'tenant-a', from: Number.NaN } },
+        { field: 'to', query: { subject: 'tenant-a', to: Number.NaN } },
+        { field: 'limit', query: { subject: 'tenant-a', limit: Number.NaN } },
+      ]
+      for (const candidate of invalid) {
+        try {
+          ledger.list(candidate.query)
+          expect.unreachable(`expected LedgerQueryError naming ${candidate.field}`)
+        } catch (error) {
+          expect(error).toBeInstanceOf(LedgerQueryError)
+          expect((error as LedgerQueryError).message).toContain(candidate.field)
+        }
+      }
+      expect(ledger.list({ subject: 'tenant-a' })).toHaveLength(1)
+      expect(
+        ledger.list({ subject: 'tenant-a', from: 0, to: 2_000_000_000_000, limit: 10 }),
+      ).toHaveLength(1)
+      expect(ledger.stats().total).toBe(1)
     } finally {
       ledger.close()
     }
@@ -119,6 +163,24 @@ describe('UsageLedger', () => {
       expect(ledger.list({ subject: 'tenant-a', from: 301 }).map(r => r.eventId)).toEqual([])
       expect(ledger.list({ subject: 'tenant-a', limit: 2 }).map(r => r.eventId)).toEqual(['a3', 'a2'])
       expect(ledger.list({ subject: 'tenant-a', limit: 0 })).toHaveLength(1)
+    } finally {
+      ledger.close()
+    }
+  })
+
+  it('pins the default limit at 500 and clamps oversized limits at 1000', async () => {
+    expect(LEDGER_LIMIT_DEFAULT).toBe(500)
+    const ledger = await openLedger()
+    try {
+      for (let i = 0; i <= 1000; i++) {
+        ledger.append(row({ eventId: `e${i}`, capturedAt: i }))
+      }
+      expect(ledger.stats().total).toBe(1001)
+      expect(ledger.list({ subject: 'tenant-a' })).toHaveLength(500)
+      const clamped = ledger.list({ subject: 'tenant-a', limit: 5000 })
+      expect(clamped).toHaveLength(1000)
+      expect(clamped[0]!.eventId).toBe('e1000')
+      expect(clamped[999]!.eventId).toBe('e1')
     } finally {
       ledger.close()
     }

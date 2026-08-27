@@ -51,6 +51,17 @@ export class LedgerRowError extends Error {
   }
 }
 
+/**
+ * Typed rejection for a malformed {@link LedgerQuery}: the message names the
+ * offending field(s) and carries no field values.
+ */
+export class LedgerQueryError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'LedgerQueryError'
+  }
+}
+
 /** Tenant-scoped read: one subject's rows, newest first. */
 export interface LedgerQuery {
   subject: string
@@ -71,6 +82,30 @@ interface UsageLedgerSqlRow {
   estimated_amount: number
   currency: string
   unpriced: number
+}
+
+/** Prepared `node:sqlite` statement, cached on the owning instance. */
+type SqlStatement = ReturnType<DatabaseSync['prepare']>
+
+/** Static SELECT column list shared by every {@link UsageLedger.list} variant. */
+const LEDGER_COLUMNS =
+  'source, event_id, subject, captured_at, provider, model, tokens, estimated_amount, currency, unpriced'
+
+/**
+ * Build one static list statement for a fixed WHERE clause; parameters and
+ * the LIMIT stay bound values, never string interpolation.
+ * @param db - the ledger's own connection the statement is prepared on.
+ * @param whereClause - static WHERE clause over bound parameters.
+ * @returns the prepared newest-first list statement.
+ */
+function listStatement(db: DatabaseSync, whereClause: string): SqlStatement {
+  return db.prepare(
+    `SELECT ${LEDGER_COLUMNS}
+     FROM usage_ledger
+     WHERE ${whereClause}
+     ORDER BY captured_at DESC
+     LIMIT ?`,
+  )
 }
 
 /** Ordered migrations applied by {@link UsageLedger.open}. */
@@ -111,8 +146,22 @@ function validateRow(row: LedgerRow): void {
   if (!isNonEmptyString(row.currency)) fields.push('currency')
   if (!Number.isSafeInteger(row.tokens) || row.tokens < 0) fields.push('tokens')
   if (!isFiniteNonNegative(row.estimatedAmount)) fields.push('estimatedAmount')
-  if (typeof row.capturedAt !== 'number' || !Number.isFinite(row.capturedAt)) fields.push('capturedAt')
+  if (!Number.isSafeInteger(row.capturedAt)) fields.push('capturedAt')
   if (fields.length > 0) throw new LedgerRowError(`invalid ledger row: ${fields.join(', ')}`)
+}
+
+/**
+ * Throw {@link LedgerQueryError} naming every query field that fails its
+ * shape contract; called before any SQL so a rejected query never reaches
+ * the database.
+ * @param query - the candidate query.
+ */
+function validateQuery(query: LedgerQuery): void {
+  const fields: string[] = []
+  if (query.from !== undefined && !Number.isSafeInteger(query.from)) fields.push('from')
+  if (query.to !== undefined && !Number.isSafeInteger(query.to)) fields.push('to')
+  if (query.limit !== undefined && !Number.isFinite(query.limit)) fields.push('limit')
+  if (fields.length > 0) throw new LedgerQueryError(`invalid ledger query: ${fields.join(', ')}`)
 }
 
 /**
@@ -129,6 +178,15 @@ function isNonEmptyString(value: unknown): boolean {
  */
 function isFiniteNonNegative(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/**
+ * @param error - failure reported by an explicit ROLLBACK.
+ * @returns whether SQLite reports no active transaction, meaning the
+ *   failed migration statement already rolled the transaction back.
+ */
+function isNoTransactionActive(error: unknown): boolean {
+  return error instanceof Error && /no transaction is active/i.test(error.message)
 }
 
 /**
@@ -167,10 +225,27 @@ function toLedgerRow(row: UsageLedgerSqlRow): LedgerRow {
  */
 export class UsageLedger {
   private readonly db: DatabaseSync
+  private readonly insertRow: SqlStatement
+  private readonly countRows: SqlStatement
+  private readonly listSubject: SqlStatement
+  private readonly listSubjectFrom: SqlStatement
+  private readonly listSubjectTo: SqlStatement
+  private readonly listSubjectFromTo: SqlStatement
   private closed = false
 
   private constructor(db: DatabaseSync) {
     this.db = db
+    this.insertRow = db.prepare(
+      `INSERT INTO usage_ledger
+         (source, event_id, subject, captured_at, provider, model, tokens, estimated_amount, currency, unpriced)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(source, event_id) DO NOTHING`,
+    )
+    this.countRows = db.prepare('SELECT COUNT(*) AS total FROM usage_ledger')
+    this.listSubject = listStatement(db, 'subject = ?')
+    this.listSubjectFrom = listStatement(db, 'subject = ? AND captured_at >= ?')
+    this.listSubjectTo = listStatement(db, 'subject = ? AND captured_at <= ?')
+    this.listSubjectFromTo = listStatement(db, 'subject = ? AND captured_at >= ? AND captured_at <= ?')
   }
 
   /**
@@ -185,13 +260,16 @@ export class UsageLedger {
       db.exec(`
         PRAGMA journal_mode = WAL;
         PRAGMA busy_timeout = 5000;
+        PRAGMA synchronous = NORMAL;
         CREATE TABLE IF NOT EXISTS ledger_migrations (
           name TEXT PRIMARY KEY,
           applied_at INTEGER NOT NULL
         ) STRICT;
       `)
       const applied = db.prepare('SELECT name FROM ledger_migrations WHERE name = ?')
-      const record = db.prepare('INSERT INTO ledger_migrations (name, applied_at) VALUES (?, ?)')
+      const record = db.prepare(
+        'INSERT INTO ledger_migrations (name, applied_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING',
+      )
       for (const migration of MIGRATIONS) {
         if (applied.get(migration.name) !== undefined) continue
         db.exec('BEGIN')
@@ -200,7 +278,16 @@ export class UsageLedger {
           record.run(migration.name, Date.now())
           db.exec('COMMIT')
         } catch (error) {
-          db.exec('ROLLBACK')
+          try {
+            db.exec('ROLLBACK')
+          } catch (rollbackError) {
+            // A failed migration statement may have already rolled the
+            // transaction back, leaving nothing for an explicit ROLLBACK;
+            // only that SQLite marker is ignored so the migration error
+            // stays the surfaced one. Any other rollback failure is a
+            // separate fault and must not be swallowed.
+            if (!isNoTransactionActive(rollbackError)) throw rollbackError
+          }
           throw error
         }
       }
@@ -220,25 +307,18 @@ export class UsageLedger {
    */
   append(row: LedgerRow): AppendOutcome {
     validateRow(row)
-    const result = this.db
-      .prepare(
-        `INSERT INTO usage_ledger
-           (source, event_id, subject, captured_at, provider, model, tokens, estimated_amount, currency, unpriced)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(source, event_id) DO NOTHING`,
-      )
-      .run(
-        row.source,
-        row.eventId,
-        row.subject,
-        row.capturedAt,
-        row.provider,
-        row.model,
-        row.tokens,
-        row.estimatedAmount,
-        row.currency,
-        row.unpriced ? 1 : 0,
-      )
+    const result = this.insertRow.run(
+      row.source,
+      row.eventId,
+      row.subject,
+      row.capturedAt,
+      row.provider,
+      row.model,
+      row.tokens,
+      row.estimatedAmount,
+      row.currency,
+      row.unpriced ? 1 : 0,
+    )
     return result.changes > 0 ? 'inserted' : 'duplicate'
   }
 
@@ -247,28 +327,23 @@ export class UsageLedger {
    * @param query - subject (exact match) with optional inclusive from/to
    *   epoch-ms bounds and a limit clamped into 1..1000 (default 500).
    * @returns the matching rows in public field naming.
+   * @throws LedgerQueryError when from/to/limit fail their shape contract.
    */
   list(query: LedgerQuery): LedgerRow[] {
-    const clauses: string[] = ['subject = ?']
+    validateQuery(query)
     const params: Array<string | number> = [query.subject]
-    if (query.from !== undefined) {
-      clauses.push('captured_at >= ?')
+    let statement = this.listSubject
+    if (query.from !== undefined && query.to !== undefined) {
+      statement = this.listSubjectFromTo
+      params.push(query.from, query.to)
+    } else if (query.from !== undefined) {
+      statement = this.listSubjectFrom
       params.push(query.from)
-    }
-    if (query.to !== undefined) {
-      clauses.push('captured_at <= ?')
+    } else if (query.to !== undefined) {
+      statement = this.listSubjectTo
       params.push(query.to)
     }
-    const limit = clampLimit(query.limit)
-    const rows = this.db
-      .prepare(
-        `SELECT source, event_id, subject, captured_at, provider, model, tokens, estimated_amount, currency, unpriced
-         FROM usage_ledger
-         WHERE ${clauses.join(' AND ')}
-         ORDER BY captured_at DESC
-         LIMIT ?`,
-      )
-      .all(...params, limit) as unknown as UsageLedgerSqlRow[]
+    const rows = statement.all(...params, clampLimit(query.limit)) as unknown as UsageLedgerSqlRow[]
     return rows.map(toLedgerRow)
   }
 
@@ -277,7 +352,7 @@ export class UsageLedger {
    * @returns total stored rows.
    */
   stats(): { total: number } {
-    const row = this.db.prepare('SELECT COUNT(*) AS total FROM usage_ledger').get() as { total: number }
+    const row = this.countRows.get() as { total: number }
     return { total: row.total }
   }
 
