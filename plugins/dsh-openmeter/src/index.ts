@@ -58,7 +58,7 @@ export {
   resolveDshHome,
 }
 export { BlockError } from './pipeline.ts'
-export { LedgerRowError } from './ledger.ts'
+export { LEDGER_LIMIT_DEFAULT, LedgerQueryError, LedgerRowError } from './ledger.ts'
 export type { AppendOutcome, LedgerQuery, LedgerRow } from './ledger.ts'
 export { billedInputTokens, buildWalRecord, meteredTokens } from './cloudevent.ts'
 

@@ -3,7 +3,13 @@ import { chmod, mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { LEDGER_LIMIT_DEFAULT, LedgerQueryError, LedgerRowError, UsageLedger } from '../src/ledger.ts'
+import {
+  LEDGER_LIMIT_DEFAULT,
+  LedgerClosedError,
+  LedgerQueryError,
+  LedgerRowError,
+  UsageLedger,
+} from '../src/ledger.ts'
 import type { LedgerQuery, LedgerRow } from '../src/ledger.ts'
 
 let dir: string | undefined
@@ -163,6 +169,8 @@ describe('UsageLedger', () => {
       expect(rows.every(r => r.subject === 'tenant-a')).toBe(true)
       expect(ledger.list({ subject: 'tenant-a', from: 200, to: 300 }).map(r => r.eventId)).toEqual(['a3', 'a2'])
       expect(ledger.list({ subject: 'tenant-a', from: 100, to: 100 }).map(r => r.eventId)).toEqual(['a1'])
+      expect(ledger.list({ subject: 'tenant-a', to: 200 }).map(r => r.eventId)).toEqual(['a2', 'a1'])
+      expect(ledger.list({ subject: 'tenant-a', from: 300 }).map(r => r.eventId)).toEqual(['a3'])
       expect(ledger.list({ subject: 'tenant-a', from: 301 }).map(r => r.eventId)).toEqual([])
       expect(ledger.list({ subject: 'tenant-a', limit: 2 }).map(r => r.eventId)).toEqual(['a3', 'a2'])
       expect(ledger.list({ subject: 'tenant-a', limit: 0 })).toHaveLength(1)
@@ -274,5 +282,32 @@ describe('UsageLedger', () => {
     const ledger = await openLedger()
     expect(() => ledger.close()).not.toThrow()
     expect(() => ledger.close()).not.toThrow()
+  })
+
+  it('append after close-before-open throws LedgerClosedError, never re-opening the database', async () => {
+    const ledger = await openLedger()
+    ledger.close()
+    let failure: unknown
+    try {
+      ledger.append(row())
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(LedgerClosedError)
+    expect((failure as Error).name).toBe('LedgerClosedError')
+  })
+
+  it('append after open-then-close throws the same LedgerClosedError, not a finalized statement', async () => {
+    const ledger = await openLedger()
+    expect(ledger.append(row())).toBe('inserted')
+    ledger.close()
+    let failure: unknown
+    try {
+      ledger.append(row({ eventId: 'evt-2' }))
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toBeInstanceOf(LedgerClosedError)
+    expect((failure as Error).name).toBe('LedgerClosedError')
   })
 })

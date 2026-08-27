@@ -67,6 +67,17 @@ export class LedgerQueryError extends Error {
   }
 }
 
+/**
+ * Typed rejection for using a closed ledger: close latches, so a later
+ * append/list/stats fails here rather than re-opening the database.
+ */
+export class LedgerClosedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'LedgerClosedError'
+  }
+}
+
 /** Tenant-scoped read: one subject's rows, newest first. */
 export interface LedgerQuery {
   subject: string
@@ -264,8 +275,10 @@ export class UsageLedger {
    * Materialize the database once: mkdir, connection, PRAGMAs, migrations,
    * prepared statements. A failure closes the connection and leaves no
    * session behind, so the next call retries from a clean state.
+   * @throws LedgerClosedError when the ledger has closed; close latches.
    */
   private ensureOpen(): LedgerSession {
+    if (this.closed) throw new LedgerClosedError('usage ledger is closed')
     const existing = this.session
     if (existing !== undefined) return existing
     mkdirSync(this.dir, { recursive: true })
@@ -334,6 +347,7 @@ export class UsageLedger {
    * @param row - the event to record; validated before any SQL runs.
    * @returns 'inserted' for a fresh row, 'duplicate' when (source, eventId) exists.
    * @throws LedgerRowError when a field fails its shape contract.
+   * @throws LedgerClosedError when the ledger has closed.
    */
   append(row: LedgerRow): AppendOutcome {
     validateRow(row)
@@ -359,6 +373,7 @@ export class UsageLedger {
    *   epoch-ms bounds and a limit clamped into 1..1000 (default 500).
    * @returns the matching rows in public field naming.
    * @throws LedgerQueryError when from/to/limit fail their shape contract.
+   * @throws LedgerClosedError when the ledger has closed.
    */
   list(query: LedgerQuery): LedgerRow[] {
     validateQuery(query)
@@ -382,13 +397,18 @@ export class UsageLedger {
   /**
    * Row count across all subjects.
    * @returns total stored rows.
+   * @throws LedgerClosedError when the ledger has closed.
    */
   stats(): { total: number } {
     const row = this.ensureOpen().countRows.get() as { total: number }
     return { total: row.total }
   }
 
-  /** Close the database connection; safe to call again, and safe when the database never opened. */
+  /**
+   * Close the database connection and latch the ledger closed (later use
+   * throws {@link LedgerClosedError}); safe to call again, and safe when
+   * the database never opened.
+   */
   close(): void {
     if (this.closed) return
     this.closed = true
