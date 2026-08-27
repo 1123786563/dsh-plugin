@@ -150,6 +150,7 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
       forwarder.stop()
       disposeStream()
       disposeEvents()
+      usageLedger.close()
     }
   }, 'openmeter: pipeline')
 

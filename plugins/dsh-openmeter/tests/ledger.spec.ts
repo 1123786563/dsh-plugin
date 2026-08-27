@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { chmod, mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -10,6 +10,9 @@ let dir: string | undefined
 
 afterEach(async () => {
   if (dir === undefined) return
+  // Tests that revoke directory write access restore it here so the
+  // recursive cleanup below can always run.
+  await chmod(dir, 0o700).catch(() => {})
   try {
     await rm(dir, { recursive: true, force: true })
   } catch (error) {
@@ -235,5 +238,41 @@ describe('UsageLedger', () => {
     } finally {
       probe.close()
     }
+  })
+
+  it('opens lazily: open() touches no filesystem, and a failed first use self-heals', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omledger-'))
+    dir = root
+    const target = join(root, 'ledger')
+    await chmod(root, 0o500)
+    const ledger = UsageLedger.open(target)
+    try {
+      // open() only records the directory: neither the directory nor the
+      // database file exists yet (MeteringWal/OperatorStore precedent).
+      await expect(stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+      let failure: unknown
+      try {
+        ledger.append(row())
+      } catch (error) {
+        failure = error
+      }
+      // An io/sqlite failure, never a row-validation rejection.
+      expect(failure).toBeInstanceOf(Error)
+      expect(failure).not.toBeInstanceOf(LedgerRowError)
+      await chmod(root, 0o700)
+      // No latch: the failed open reset its state, so the next append
+      // retries from clean and succeeds once the directory recovers.
+      expect(ledger.append(row())).toBe('inserted')
+      expect(ledger.list({ subject: 'tenant-a' })).toEqual([row()])
+      expect(ledger.stats().total).toBe(1)
+    } finally {
+      await chmod(root, 0o700).catch(() => {})
+    }
+  })
+
+  it('close() is a safe no-op on a ledger that never opened its database', async () => {
+    const ledger = await openLedger()
+    expect(() => ledger.close()).not.toThrow()
+    expect(() => ledger.close()).not.toThrow()
   })
 })

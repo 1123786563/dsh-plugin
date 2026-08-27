@@ -10,6 +10,11 @@
  * after insertion — a conflicting duplicate leaves the original row
  * untouched.
  *
+ * Opening is lazy: open(dir) records the directory and touches nothing;
+ * the directory, connection, PRAGMAs, and migrations materialize on the
+ * first append/list/stats, and a failed open resets so the next call
+ * retries clean (self-healing once the directory recovers).
+ *
  * @module dsh-openmeter/ledger
  */
 
@@ -108,7 +113,7 @@ function listStatement(db: DatabaseSync, whereClause: string): SqlStatement {
   )
 }
 
-/** Ordered migrations applied by {@link UsageLedger.open}. */
+/** Ordered migrations applied when the ledger first opens its database. */
 const MIGRATIONS: ReadonlyArray<{ name: string, sql: string }> = [
   {
     name: '0001-create-usage-ledger',
@@ -219,43 +224,53 @@ function toLedgerRow(row: UsageLedgerSqlRow): LedgerRow {
   }
 }
 
+/** The connection plus every statement cached on it for one open ledger. */
+interface LedgerSession {
+  db: DatabaseSync
+  insertRow: SqlStatement
+  countRows: SqlStatement
+  listSubject: SqlStatement
+  listSubjectFrom: SqlStatement
+  listSubjectTo: SqlStatement
+  listSubjectFromTo: SqlStatement
+}
+
 /**
  * The durable usage ledger. Single-writer synchronous API; one instance
  * owns the database connection until {@link UsageLedger.close}.
  */
 export class UsageLedger {
-  private readonly db: DatabaseSync
-  private readonly insertRow: SqlStatement
-  private readonly countRows: SqlStatement
-  private readonly listSubject: SqlStatement
-  private readonly listSubjectFrom: SqlStatement
-  private readonly listSubjectTo: SqlStatement
-  private readonly listSubjectFromTo: SqlStatement
+  private readonly dir: string
+  private session: LedgerSession | undefined
   private closed = false
 
-  private constructor(db: DatabaseSync) {
-    this.db = db
-    this.insertRow = db.prepare(
-      `INSERT INTO usage_ledger
-         (source, event_id, subject, captured_at, provider, model, tokens, estimated_amount, currency, unpriced)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(source, event_id) DO NOTHING`,
-    )
-    this.countRows = db.prepare('SELECT COUNT(*) AS total FROM usage_ledger')
-    this.listSubject = listStatement(db, 'subject = ?')
-    this.listSubjectFrom = listStatement(db, 'subject = ? AND captured_at >= ?')
-    this.listSubjectTo = listStatement(db, 'subject = ? AND captured_at <= ?')
-    this.listSubjectFromTo = listStatement(db, 'subject = ? AND captured_at >= ? AND captured_at <= ?')
+  private constructor(dir: string) {
+    this.dir = dir
   }
 
   /**
-   * Open (or create) the ledger in a directory.
-   * @param dir - directory for usage-ledger.sqlite, created when missing.
-   * @returns the opened ledger with all migrations applied.
+   * Open a ledger lazily: record the directory and touch nothing (the
+   * MeteringWal/OperatorStore precedent — constructors do no I/O). The
+   * database is created and migrated on the first append/list/stats.
+   * @param dir - directory for usage-ledger.sqlite, created on first use.
+   * @returns the ledger instance; open failures surface on first use and
+   *   retry, never latching.
    */
   static open(dir: string): UsageLedger {
-    mkdirSync(dir, { recursive: true })
-    const db = new DatabaseSync(join(dir, 'usage-ledger.sqlite'))
+    return new UsageLedger(dir)
+  }
+
+  /**
+   * Materialize the database once: mkdir, connection, PRAGMAs, migrations,
+   * prepared statements. A failure closes the connection and leaves no
+   * session behind, so the next call retries from a clean state.
+   */
+  private ensureOpen(): LedgerSession {
+    const existing = this.session
+    if (existing !== undefined) return existing
+    mkdirSync(this.dir, { recursive: true })
+    const db = new DatabaseSync(join(this.dir, 'usage-ledger.sqlite'))
+    let session: LedgerSession
     try {
       db.exec(`
         PRAGMA journal_mode = WAL;
@@ -291,11 +306,26 @@ export class UsageLedger {
           throw error
         }
       }
+      session = {
+        db,
+        insertRow: db.prepare(
+          `INSERT INTO usage_ledger
+             (source, event_id, subject, captured_at, provider, model, tokens, estimated_amount, currency, unpriced)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(source, event_id) DO NOTHING`,
+        ),
+        countRows: db.prepare('SELECT COUNT(*) AS total FROM usage_ledger'),
+        listSubject: listStatement(db, 'subject = ?'),
+        listSubjectFrom: listStatement(db, 'subject = ? AND captured_at >= ?'),
+        listSubjectTo: listStatement(db, 'subject = ? AND captured_at <= ?'),
+        listSubjectFromTo: listStatement(db, 'subject = ? AND captured_at >= ? AND captured_at <= ?'),
+      }
     } catch (error) {
       db.close()
       throw error
     }
-    return new UsageLedger(db)
+    this.session = session
+    return session
   }
 
   /**
@@ -307,7 +337,8 @@ export class UsageLedger {
    */
   append(row: LedgerRow): AppendOutcome {
     validateRow(row)
-    const result = this.insertRow.run(
+    const { insertRow } = this.ensureOpen()
+    const result = insertRow.run(
       row.source,
       row.eventId,
       row.subject,
@@ -331,16 +362,17 @@ export class UsageLedger {
    */
   list(query: LedgerQuery): LedgerRow[] {
     validateQuery(query)
+    const session = this.ensureOpen()
     const params: Array<string | number> = [query.subject]
-    let statement = this.listSubject
+    let statement = session.listSubject
     if (query.from !== undefined && query.to !== undefined) {
-      statement = this.listSubjectFromTo
+      statement = session.listSubjectFromTo
       params.push(query.from, query.to)
     } else if (query.from !== undefined) {
-      statement = this.listSubjectFrom
+      statement = session.listSubjectFrom
       params.push(query.from)
     } else if (query.to !== undefined) {
-      statement = this.listSubjectTo
+      statement = session.listSubjectTo
       params.push(query.to)
     }
     const rows = statement.all(...params, clampLimit(query.limit)) as unknown as UsageLedgerSqlRow[]
@@ -352,14 +384,14 @@ export class UsageLedger {
    * @returns total stored rows.
    */
   stats(): { total: number } {
-    const row = this.countRows.get() as { total: number }
+    const row = this.ensureOpen().countRows.get() as { total: number }
     return { total: row.total }
   }
 
-  /** Close the database connection; safe to call again. */
+  /** Close the database connection; safe to call again, and safe when the database never opened. */
   close(): void {
     if (this.closed) return
     this.closed = true
-    this.db.close()
+    this.session?.db.close()
   }
 }

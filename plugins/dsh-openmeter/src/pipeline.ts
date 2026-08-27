@@ -79,6 +79,8 @@ export class MeteringPipeline {
   private recent: UsageRow[] = []
   private readonly seenEventKeys = new Set<string>()
   private readonly stepStarts = new Map<string, number>()
+  private ledgerDrops = 0
+  private lastLedgerError: string | undefined
 
   /**
    * @param deps - the wired collaborators (all live accessors).
@@ -218,7 +220,8 @@ export class MeteringPipeline {
    * Mirror one metered event into the durable usage ledger (the local
    * estimate/display source). A duplicate append is an acknowledged event.
    * Best effort: the WAL already holds the authoritative record, so a ledger
-   * failure is swallowed and never breaks metering.
+   * failure is counted ({@link MeteringPipeline.usageLedgerHealth}) and
+   * never breaks metering.
    * @param config - config snapshot at meter time (source of the row's source).
    * @param call - the metered call (subject attribution and capture time).
    * @param record - the WAL record built for it (event id join key).
@@ -239,12 +242,27 @@ export class MeteringPipeline {
         currency: estimate.currency,
         unpriced: estimate.unpriced,
       })
-    } catch {
+    } catch (error) {
       // Swallow: LedgerRowError (a row the pipeline itself malformed) and
       // node:sqlite runtime failures — the ledger is the estimate/display
       // mirror and the WAL already carries the authoritative event, so
       // metering must not fail because the mirror could not be written
-      // (OperatorStore.save takes the same stance).
+      // (OperatorStore.save takes the same stance). The drop is counted so
+      // status surfacing can report it.
+      this.ledgerDrops += 1
+      this.lastLedgerError = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  /**
+   * Ledger-mirror health for status surfacing.
+   * @returns drops counted so far, plus the last drop's error message when
+   *   one occurred.
+   */
+  usageLedgerHealth(): { drops: number, lastError?: string } {
+    return {
+      drops: this.ledgerDrops,
+      ...(this.lastLedgerError === undefined ? {} : { lastError: this.lastLedgerError }),
     }
   }
 

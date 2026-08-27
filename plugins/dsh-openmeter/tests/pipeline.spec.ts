@@ -44,6 +44,8 @@ async function build(options: {
   dir?: string
   /** Omit the usageLedger dep (pipeline must work exactly as before). */
   withoutLedger?: boolean
+  /** Replace the real ledger dep with a stand-in (failure-path scenarios). */
+  ledgerDep?: Pick<UsageLedger, 'append'>
 }) {
   dir = options.dir ?? await mkdtemp(join(tmpdir(), 'ompipe-'))
   const config = resolveConfig({ accessCacheTtlMs: 5_000 })
@@ -54,18 +56,21 @@ async function build(options: {
   const estimator = new PriceEstimator(() => client, () => config.quoteCurrency)
   const wal = new MeteringWal(dir)
   await wal.load()
-  const usageLedger = options.withoutLedger === true ? undefined : UsageLedger.open(dir)
+  const usageLedger = options.withoutLedger === true || options.ledgerDep !== undefined
+    ? undefined
+    : UsageLedger.open(dir)
   if (usageLedger !== undefined) ledgers.push(usageLedger)
+  const ledgerDep = options.ledgerDep ?? usageLedger
   const sessions = sessionsWith(options.header)
   const pipeline = new MeteringPipeline({
     wal,
     gate,
     estimator,
+    ...(ledgerDep === undefined ? {} : { usageLedger: ledgerDep }),
     getConfig: () => config,
     sessions: () => sessions,
     presetSubject: presetId => store.subjectFor(presetId, config.houseSubject),
     observePreset: presetId => store.observePreset(presetId),
-    ...(usageLedger === undefined ? {} : { usageLedger }),
   })
   return { pipeline, wal, store, config, ledger: usageLedger, dir }
 }
@@ -212,6 +217,15 @@ describe('durable usage ledger integration', () => {
       unpriced: row.unpriced,
       at: row.capturedAt,
     })
+    // Unreachability pin: the same row shape is appendable directly by a
+    // fresh ledger connection under a distinct event id — LedgerRowError is
+    // unreachable for rows the pipeline itself produces.
+    const direct = UsageLedger.open(dir)
+    try {
+      expect(direct.append({ ...row, eventId: 'evt-direct-pin' })).toBe('inserted')
+    } finally {
+      direct.close()
+    }
   })
 
   it('keeps a single ledger row when the same (session, seq) is delivered twice', async () => {
@@ -232,37 +246,23 @@ describe('durable usage ledger integration', () => {
     expect(ledger.stats().total).toBe(1)
   })
 
-  it('acknowledges a ledger-level duplicate without touching the original row', async () => {
-    const { pipeline, ledger: maybeLedger, config } = await build({})
+  it('meters billed input plus output into the ledger token total', async () => {
+    // Own fixture (the shared `usage` stays untouched): cache tokens must
+    // land in the ledger total — a pin on meteredTokens (billed input +
+    // output) wiring, not plain input + output.
+    const cachedUsage = { inputTokens: 100, outputTokens: 50, cacheReadTokens: 20, cacheWriteTokens: 10 }
+    const { pipeline, ledger: maybeLedger } = await build({})
     const ledger = maybeLedger!
     pipeline.onSessionEvent('s1', {
       type: 'assistant/message',
       seq: 3,
       time: 1_700_000_000_000,
-      data: { turn: 1, step: 0, usage, message: { source: { provider: 'deepseek', model: 'glm-5.3' } } },
+      data: { turn: 1, step: 0, usage: cachedUsage, message: { source: { provider: 'deepseek', model: 'glm-5.3' } } },
     })
     await vi.waitFor(() => {
       expect(ledger.list({ subject: 'house' })).toHaveLength(1)
     })
-    const original = ledger.list({ subject: 'house' })[0]!
-    // Same (source, eventId) with a conflicting payload: the write-once
-    // seam the pipeline relies on when it treats 'duplicate' as acknowledged.
-    const outcome = ledger.append({
-      source: config.eventSource,
-      eventId: original.eventId,
-      subject: 'other-tenant',
-      capturedAt: 1,
-      provider: 'p',
-      model: 'm',
-      tokens: 1,
-      estimatedAmount: 1,
-      currency: 'USD',
-      unpriced: false,
-    })
-    expect(outcome).toBe('duplicate')
-    expect(ledger.list({ subject: 'house' })).toEqual([original])
-    expect(ledger.list({ subject: 'other-tenant' })).toHaveLength(0)
-    expect(ledger.stats().total).toBe(1)
+    expect(ledger.list({ subject: 'house' })[0]!.tokens).toBe(180)
   })
 
   it('recovers persisted rows across a new pipeline instance on the same directory', async () => {
@@ -330,6 +330,53 @@ describe('durable usage ledger integration', () => {
       expect(observer.stats().total).toBe(0)
     } finally {
       observer.close()
+    }
+  })
+})
+
+describe('usage ledger health (drop observability)', () => {
+  it('starts at zero drops with no lastError property present', async () => {
+    const { pipeline } = await build({})
+    const health = pipeline.usageLedgerHealth()
+    expect(health).toEqual({ drops: 0 })
+    expect('lastError' in health).toBe(false)
+  })
+
+  it('counts drops while metering still completes when the ledger append fails', async () => {
+    const { pipeline, wal } = await build({ ledgerDep: { append: () => { throw new Error('ledger exploded') } } })
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      pipeline.onSessionEvent('s1', {
+        type: 'assistant/message',
+        seq: 3,
+        time: 1_700_000_000_000,
+        data: { turn: 1, step: 0, usage, message: { source: { provider: 'deepseek', model: 'glm-5.3' } } },
+      })
+      // Metering completes: the WAL holds the authoritative record, the
+      // ring row appears (pushed after the swallowed ledger failure), and
+      // no unhandled rejection escapes the fire-and-forget meter promise.
+      await vi.waitFor(() => {
+        expect(wal.pending()).toHaveLength(1)
+        expect(pipeline.usageRows()).toHaveLength(1)
+      })
+      expect(pipeline.usageLedgerHealth().drops).toBe(1)
+      expect(pipeline.usageLedgerHealth().lastError).toBe('ledger exploded')
+
+      pipeline.onSessionEvent('s1', {
+        type: 'assistant/message',
+        seq: 4,
+        time: 1_700_000_000_001,
+        data: { turn: 1, step: 1, usage, message: { source: { provider: 'deepseek', model: 'glm-5.3' } } },
+      })
+      await vi.waitFor(() => {
+        expect(pipeline.usageRows()).toHaveLength(2)
+      })
+      expect(pipeline.usageLedgerHealth().drops).toBe(2)
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
     }
   })
 })
