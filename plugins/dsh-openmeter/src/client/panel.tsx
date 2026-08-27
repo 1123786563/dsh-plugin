@@ -1,9 +1,11 @@
 /**
  * The billing settings section (a top-level Settings page): the tenant 概览
  * (credit balance, runway, model cost distribution, detail CTA — no operator
- * data), plus the operator surfaces — 收银台 (customers, balances, recharge,
- * block/unblock, preset bindings) and 设置 (the config card, when provided).
- * Owns its chrome; plain fetch on mount and on manual refresh.
+ * data) with its 用量明细 drill-down (mounted on first open, then kept alive
+ * behind a display toggle so filters, rows, and the cursor survive
+ * back-and-forth), plus the operator surfaces — 收银台 (customers, balances,
+ * recharge, block/unblock, preset bindings) and 设置 (the config card, when
+ * provided). Owns its chrome; plain fetch on mount and on manual refresh.
  *
  * @module dsh-openmeter/client/panel
  */
@@ -11,10 +13,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { api } from './api.ts'
-import type { BindingsPayload, CustomersPayload, StatusPayload, SummaryPayload, UsagePayload } from './api.ts'
+import type { BindingsPayload, CustomersPayload, PageStats, StatusPayload, SummaryPayload, UsageDetailRow, UsagePayload } from './api.ts'
 import { buildOverviewModel } from './overview.ts'
 import type { ModelRow } from './overview.ts'
 import { dictionary, format } from './locales.ts'
+import { formatClock, formatCny, formatTokens, groupUsageRows, toUsageQuery } from './usage-detail.ts'
+import type { UsageDetailFilters } from './usage-detail.ts'
 
 /** Copy reader. */
 type T = (key: string, params?: Record<string, string | number>) => string
@@ -35,12 +39,9 @@ interface OverviewState {
   error: string | undefined
 }
 
-/** Default detail callback until the host wires navigation. */
-const noop = (): void => {}
-
 /**
  * Render the billing settings section.
- * @param props - { t?, config?, onOpenUsageDetail? } the locale seat, the optional config card, and the tenant detail CTA target.
+ * @param props - { t?, config?, onOpenUsageDetail? } the locale seat, the optional config card, and the tenant detail CTA target (invoked once per CTA click, alongside the built-in detail view).
  * @returns the section.
  */
 export function BillingPanel(props: { t?: T, config?: ReactNode, onOpenUsageDetail?: () => void } = {}): ReactNode {
@@ -55,10 +56,19 @@ export function BillingPanel(props: { t?: T, config?: ReactNode, onOpenUsageDeta
     const raw = seated !== undefined ? seated(key, params) : dict[key] ?? key
     return params === undefined ? raw : format(raw, params)
   }, [])
-  const [view, setView] = useState<'overview' | 'cashier' | 'config'>('overview')
+  const [view, setView] = useState<'overview' | 'cashier' | 'config' | 'detail'>('overview')
   const [state, setState] = useState<PanelState>({ status: undefined, customers: undefined, bindings: undefined, error: undefined, busy: false })
   // Bumped by the manual refresh button so the overview re-fetches too.
   const [reloadSeq, setReloadSeq] = useState(0)
+  // Once the detail view has been opened it stays mounted (hidden behind a
+  // display toggle), so its filters, rows, and cursor survive back-and-forth.
+  const [detailOpened, setDetailOpened] = useState(false)
+
+  const openDetail = (): void => {
+    setDetailOpened(true)
+    setView('detail')
+    props.onOpenUsageDetail?.()
+  }
 
   const reload = useCallback(async (): Promise<void> => {
     setState(previous => ({ ...previous, busy: true }))
@@ -98,9 +108,18 @@ export function BillingPanel(props: { t?: T, config?: ReactNode, onOpenUsageDeta
         <button type="button" style={buttonStyle} disabled={state.busy} onClick={() => { setReloadSeq(count => count + 1); void reload() }}>{t('panel.refresh')}</button>
       </div>
       {state.error !== undefined && <p style={warnStyle}>{state.error}</p>}
-      {view === 'config' ? props.config : view === 'overview'
-        ? <OverviewView t={t} reloadSeq={reloadSeq} onOpenDetail={props.onOpenUsageDetail ?? noop} />
-        : <CashierView state={state} t={t} reload={reload} />}
+      {view !== 'detail' && (view === 'config' ? props.config : view === 'overview'
+        ? <OverviewView t={t} reloadSeq={reloadSeq} onOpenDetail={openDetail} />
+        : <CashierView state={state} t={t} reload={reload} />)}
+      {detailOpened && (
+        <div style={{ display: view === 'detail' ? 'block' : 'none' }}>
+          <div style={detailBarStyle}>
+            <button type="button" style={buttonStyle} onClick={() => { setView('overview') }}>{t('detail.back')}</button>
+            <span style={{ fontWeight: 600 }}>{t('detail.title')}</span>
+          </div>
+          <UsageDetailView t={t} />
+        </div>
+      )}
     </div>
   )
 }
@@ -331,6 +350,149 @@ function CashierView(props: { state: PanelState, t: T, reload: () => Promise<voi
   )
 }
 
+/**
+ * The tenant usage-detail journal: filter controls (from/to local days +
+ * exact model match), per-day grouped rows with subtotals, the filtered-range
+ * totals line, and keyset next-page pagination. Fetches on first mount, on
+ * every committed filter change, on retry, and on next-page; rows accumulate
+ * across pages. A failed fetch renders a localized banner — never the
+ * rejection's own text, which can carry route internals — and keeps prior
+ * rows. No operator data and no subject/tenantId parameter: only the
+ * caller's own journal is reachable.
+ * @param props - locale.
+ */
+function UsageDetailView(props: { t: T }): ReactNode {
+  const { t } = props
+  const [filters, setFilters] = useState<UsageDetailFilters>({})
+  const [query, setQuery] = useState<UsageDetailFilters>({})
+  const [rows, setRows] = useState<UsageDetailRow[]>([])
+  const [cursor, setCursor] = useState<string | undefined>(undefined)
+  const [cursorPage, setCursorPage] = useState<string | undefined>(undefined)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  const [totals, setTotals] = useState<PageStats | undefined>(undefined)
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true)
+    setError(false)
+    api.usageDetail(toUsageQuery(query, cursorPage)).then(
+      payload => {
+        if (!alive) return
+        setRows(previous => [...previous, ...payload.rows])
+        setCursor(payload.cursor)
+        setTotals(payload.totals)
+        setLoading(false)
+      },
+      () => {
+        if (!alive) return
+        setError(true)
+        setLoading(false)
+      },
+    )
+    return () => {
+      alive = false
+    }
+  }, [query, cursorPage, attempt])
+
+  /** Compose the shared calls/tokens/CNY stats string with the optional unpriced suffix. */
+  const statsText = (calls: number, tokens: number, cny: number, unpriced: number): string => {
+    const base = t('detail.stats', { calls, tokens: formatTokens(tokens), cny: formatCny(cny) })
+    return unpriced > 0 ? `${base} · ${t('detail.unpricedCount', { count: unpriced })}` : base
+  }
+
+  /** Commit the edited filters: reset rows, cursor, and totals, then refetch. */
+  const apply = (): void => {
+    setQuery({ ...filters })
+    setCursor(undefined)
+    setCursorPage(undefined)
+    setRows([])
+    setTotals(undefined)
+  }
+
+  const groups = groupUsageRows(rows)
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={controlsStyle}>
+        <label style={controlLabelStyle}>{t('detail.from')}<input type="date" style={inputStyle} value={filters.from ?? ''} onChange={event => { setFilters({ ...filters, from: event.target.value }) }} /></label>
+        <label style={controlLabelStyle}>{t('detail.to')}<input type="date" style={inputStyle} value={filters.to ?? ''} onChange={event => { setFilters({ ...filters, to: event.target.value }) }} /></label>
+        <label style={controlLabelStyle}>{t('overview.model')}<input type="text" style={inputStyle} placeholder={t('detail.modelPlaceholder')} value={filters.model ?? ''} onChange={event => { setFilters({ ...filters, model: event.target.value }) }} /></label>
+        <button type="button" style={buttonStyle} onClick={apply}>{t('detail.apply')}</button>
+      </div>
+      {error && (
+        <div style={actionsStyle}>
+          <span style={warnStyle}>{t('detail.error')}</span>
+          <button type="button" style={buttonStyle} onClick={() => { setAttempt(count => count + 1) }}>{t('detail.retry')}</button>
+        </div>
+      )}
+      {loading && rows.length === 0 && <p style={{ ...mutedStyle, margin: 0 }}>…</p>}
+      {!loading && !error && rows.length === 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <p style={{ ...mutedStyle, margin: 0 }}>{t('detail.empty')}</p>
+          <p style={{ ...mutedStyle, margin: 0 }}>{t('detail.emptyNote')}</p>
+        </div>
+      )}
+      {groups.map(group => (
+        <section key={group.key}>
+          <h4 style={hStyle}>{group.key}</h4>
+          <p style={{ ...mutedStyle, margin: 0 }}>
+            {statsText(group.calls, group.tokens, group.estimatedAmountCny, group.unpricedCalls)}
+          </p>
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>{t('detail.colTime')}</th>
+                <th style={thStyle}>{t('detail.colSource')}</th>
+                <th style={thStyle}>{t('overview.model')}</th>
+                <th style={thStyle}>{t('overview.tokens')}</th>
+                <th style={thStyle}>{t('detail.colCost')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {group.rows.map((row, index) => (
+                <tr key={`${row.at}-${index}`}>
+                  <td style={tdStyle}>{formatClock(row.at)}</td>
+                  <td style={tdStyle}>{row.provider}</td>
+                  <td style={tdStyle}>{row.model}</td>
+                  <td style={tdStyle}>
+                    <div>{formatTokens(row.tokens)}</div>
+                    <div style={mutedStyle}>
+                      {t('detail.dimensions', {
+                        input: row.inputTokens,
+                        output: row.outputTokens,
+                        cacheRead: row.cacheReadTokens,
+                        cacheWrite: row.cacheWriteTokens,
+                        reasoning: row.reasoningTokens,
+                      })}
+                    </div>
+                  </td>
+                  <td style={tdStyle}>
+                    {row.unpriced
+                      ? <span style={mutedStyle}>{t('detail.unpriced')}</span>
+                      : row.currency === 'CNY' ? formatCny(row.estimatedAmount) : `${row.estimatedAmount} ${row.currency}`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ))}
+      {rows.length > 0 && totals !== undefined && (
+        <p style={{ margin: 0 }}>
+          {t('detail.totals', { stats: statsText(totals.calls, totals.tokens, totals.estimatedAmountCny, totals.unpricedCalls) })}
+        </p>
+      )}
+      {cursor !== undefined && !loading && (
+        <div style={actionsStyle}>
+          <button type="button" style={buttonStyle} onClick={() => { if (cursor !== undefined) setCursorPage(cursor) }}>{t('detail.nextPage')}</button>
+        </div>
+      )}
+      {!loading && !error && rows.length > 0 && cursor === undefined && <p style={{ ...mutedStyle, margin: 0 }}>{t('detail.end')}</p>}
+    </div>
+  )
+}
+
 const pageStyle: CSSProperties = { margin: 0, fontSize: 16 }
 const introStyle: CSSProperties = { margin: 0, opacity: 0.7 }
 const tabsStyle: CSSProperties = { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }
@@ -347,3 +509,6 @@ const warnStyle: CSSProperties = { color: '#d2482d' }
 const headlineStyle: CSSProperties = { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }
 const actionsStyle: CSSProperties = { display: 'flex', gap: 6, flexWrap: 'wrap' }
 const balanceStyle: CSSProperties = { fontSize: 14, fontWeight: 600 }
+const detailBarStyle: CSSProperties = { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }
+const controlsStyle: CSSProperties = { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }
+const controlLabelStyle: CSSProperties = { display: 'flex', gap: 4, alignItems: 'center' }

@@ -14,6 +14,8 @@
  * - The query never carries NaN: an empty or unparseable filter value is
  *   omitted, and `limit` is never set here (the server default of 50 owns
  *   page size).
+ * - The fixed-offset local-day bound (midnight + 86_399_999 ms) assumes a
+ *   DST-free local timezone.
  *
  * @module dsh-openmeter/client/usage-detail
  */

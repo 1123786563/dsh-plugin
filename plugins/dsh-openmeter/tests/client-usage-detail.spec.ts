@@ -45,6 +45,10 @@ describe('groupUsageRows', () => {
     expect(groups.map(group => group.key)).toEqual(['2026-08-30', '2026-08-29', '2026-08-28'])
   })
 
+  it('returns an empty group list for empty input', () => {
+    expect(groupUsageRows([])).toEqual([])
+  })
+
   it('accumulates same-day rows into one group keeping arrival order, with per-day calls and tokens', () => {
     const rows = [
       makeRow({ at: shanghai(2026, 7, 30, 9, 0), model: 'deepseek-chat', tokens: 1200 }),
@@ -107,6 +111,11 @@ describe('toUsageQuery', () => {
     const query = toUsageQuery({ from: '2026-08-01', to: '2026-08-01' })
     expect(query.from).toBe(shanghai(2026, 7, 1))
     expect(query.to).toBe(shanghai(2026, 7, 1) + DAY_MS - 1)
+  })
+
+  it('applies one-sided bounds: a lone from keeps its midnight and a lone to keeps its end-of-day', () => {
+    expect(toUsageQuery({ from: '2026-08-01' })).toEqual({ from: shanghai(2026, 7, 1) })
+    expect(toUsageQuery({ to: '2026-08-31' })).toEqual({ to: shanghai(2026, 7, 31) + DAY_MS - 1 })
   })
 
   it('omits empty or unparseable date strings instead of yielding NaN', () => {
