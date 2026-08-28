@@ -23,8 +23,12 @@
 export interface BillingCapabilities {
   /** The caller passed the server's operator policy gate (operator status probe succeeded). */
   readonly operator: boolean
-  /** The caller's policy grants budget writes (tenant-manager role). */
-  readonly manager: boolean
+  /**
+   * The caller's policy grants budget writes (tenant-manager role). Optional:
+   * it affects the budget editor, never the navigation itself, and the panel
+   * may not know it yet when the navigation first renders.
+   */
+  readonly manager?: boolean
 }
 
 /** The panel views a navigation entry can switch to. */

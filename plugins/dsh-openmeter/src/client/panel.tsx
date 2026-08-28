@@ -4,9 +4,12 @@
  * manager-only editor, model cost distribution, detail CTA — no operator
  * data) with its 用量明细 drill-down (mounted on first open, then kept alive
  * behind a display toggle so filters, rows, and the cursor survive
- * back-and-forth), plus the operator surfaces — 收银台 (customers, balances,
- * recharge, block/unblock, preset bindings) and 设置 (the config card, when
- * provided). Owns its chrome; plain fetch on mount and on manual refresh.
+ * back-and-forth), the 预算 entry (the budget card as its own view), plus
+ * the operator surfaces — 收银台 (customers, balances, recharge,
+ * block/unblock, preset bindings) and 设置 (the config card, when provided)
+ * — rendered only for callers the operator status probe authenticates
+ * (issue #10: hiding never replaces the server-side operator guards). Owns
+ * its chrome; plain fetch on mount and on manual refresh.
  *
  * @module dsh-openmeter/client/panel
  */
@@ -19,6 +22,8 @@ import { budgetCopy } from './budget-ui.ts'
 import type { BudgetCopyModel } from './budget-ui.ts'
 import { buildOverviewModel } from './overview.ts'
 import type { ModelRow } from './overview.ts'
+import { buildBillingNavigation } from './navigation.ts'
+import type { BillingView } from './navigation.ts'
 import { dictionary, format } from './locales.ts'
 import { formatClock, formatCny, formatTokens, groupUsageRows, toUsageQuery } from './usage-detail.ts'
 import type { UsageDetailFilters } from './usage-detail.ts'
@@ -29,6 +34,8 @@ type T = (key: string, params?: Record<string, string | number>) => string
 /** Panel state. */
 interface PanelState {
   status: StatusPayload | undefined
+  /** Whether the operator status probe authenticated the caller (issue #10). */
+  operator: boolean
   customers: CustomersPayload | undefined
   bindings: BindingsPayload | undefined
   error: string | undefined
@@ -63,8 +70,8 @@ export function BillingPanel(props: { t?: T, config?: ReactNode, onOpenUsageDeta
     const raw = seated !== undefined ? seated(key, params) : dict[key] ?? key
     return params === undefined ? raw : format(raw, params)
   }, [])
-  const [view, setView] = useState<'overview' | 'cashier' | 'config' | 'detail'>('overview')
-  const [state, setState] = useState<PanelState>({ status: undefined, customers: undefined, bindings: undefined, error: undefined, busy: false })
+  const [view, setView] = useState<BillingView>('overview')
+  const [state, setState] = useState<PanelState>({ status: undefined, operator: false, customers: undefined, bindings: undefined, error: undefined, busy: false })
   // Bumped by the manual refresh button so the overview re-fetches too.
   const [reloadSeq, setReloadSeq] = useState(0)
   // Once the detail view has been opened it stays mounted (hidden behind a
@@ -77,12 +84,25 @@ export function BillingPanel(props: { t?: T, config?: ReactNode, onOpenUsageDeta
     props.onOpenUsageDetail?.()
   }
 
+  /** Switch to one navigation entry's view (the detail entry latches keep-alive). */
+  const switchView = (target: BillingView): void => {
+    if (target === 'detail') {
+      setDetailOpened(true)
+      setView('detail')
+      return
+    }
+    setView(target)
+  }
+
   const reload = useCallback(async (): Promise<void> => {
     setState(previous => ({ ...previous, busy: true }))
     const status = await api.status().catch(() => undefined)
-    const next: PanelState = { status, customers: undefined, bindings: undefined, error: undefined, busy: false }
-    if (status === undefined) next.error = t('panel.statusError')
-    if (view === 'cashier') {
+    // The operator-gated status route doubles as the capability probe
+    // (issue #10): success authenticates an operator, a refusal reads as a
+    // plain tenant — never an error banner on the tenant surface.
+    const operator = status !== undefined
+    const next: PanelState = { status, operator, customers: undefined, bindings: undefined, error: undefined, busy: false }
+    if (operator && view === 'cashier') {
       const [customers, bindings] = await Promise.all([api.customers().catch(() => undefined), api.bindings().catch(() => undefined)])
       next.customers = customers
       next.bindings = bindings
@@ -96,16 +116,25 @@ export function BillingPanel(props: { t?: T, config?: ReactNode, onOpenUsageDeta
   }, [reload])
 
   const pending = state.status?.wal.pending
+  // Issue #10: navigation entries derive from the authenticated capability
+  // set — tenants get overview/detail/budget; the operator entries (and the
+  // config card seat) render only when the probe authenticated an operator.
+  const entries = buildBillingNavigation({ operator: state.operator }).filter(
+    entry => entry.view !== 'settings' || props.config !== undefined,
+  )
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12, padding: '4px 2px' }}>
       <h2 style={pageStyle}>{t('card.title')}</h2>
       <p style={introStyle}>{t('card.description')}</p>
       <div style={tabsStyle}>
-        <button type="button" style={view === 'overview' ? tabActiveStyle : tabStyle} onClick={() => { setView('overview') }}>{t('panel.overview')}</button>
-        <button type="button" style={view === 'cashier' ? tabActiveStyle : tabStyle} onClick={() => { setView('cashier') }}>{t('panel.cashier')}</button>
-        {props.config !== undefined && (
-          <button type="button" style={view === 'config' ? tabActiveStyle : tabStyle} onClick={() => { setView('config') }}>{t('panel.settings')}</button>
-        )}
+        {entries.map(entry => (
+          <button
+            key={entry.id}
+            type="button"
+            style={view === entry.view ? tabActiveStyle : tabStyle}
+            onClick={() => { switchView(entry.view) }}
+          >{t(entry.labelKey)}</button>
+        ))}
         <span style={{ flex: 1 }} />
         {state.status !== undefined && (
           <span style={pending !== undefined && pending > 0 ? warnStyle : mutedStyle}>
@@ -115,9 +144,11 @@ export function BillingPanel(props: { t?: T, config?: ReactNode, onOpenUsageDeta
         <button type="button" style={buttonStyle} disabled={state.busy} onClick={() => { setReloadSeq(count => count + 1); void reload() }}>{t('panel.refresh')}</button>
       </div>
       {state.error !== undefined && <p style={warnStyle}>{state.error}</p>}
-      {view !== 'detail' && (view === 'config' ? props.config : view === 'overview'
+      {view !== 'detail' && (view === 'settings' ? props.config : view === 'overview'
         ? <OverviewView t={t} reloadSeq={reloadSeq} onOpenDetail={openDetail} />
-        : <CashierView state={state} t={t} reload={reload} />)}
+        : view === 'budget'
+          ? <BudgetView t={t} reloadSeq={reloadSeq} />
+          : state.operator === true ? <CashierView state={state} t={t} reload={reload} /> : null)}
       {detailOpened && (
         <div style={{ display: view === 'detail' ? 'block' : 'none' }}>
           <div style={detailBarStyle}>
@@ -407,6 +438,42 @@ function BudgetCard(props: { t: T, budget: BudgetState, onSaved: (payload: Budge
         </div>
       )}
     </section>
+  )
+}
+
+/**
+ * The 预算 entry's own view (issue #10): the budget warning card mounted
+ * standalone, fetching its own payload on mount, on every `reloadSeq` bump,
+ * and on retry. A failed fetch degrades exactly like the overview's inline
+ * card (the unavailable line, no editor) — never an operator surface.
+ * @param props - locale and the panel's refresh signal.
+ */
+function BudgetView(props: { t: T, reloadSeq: number }): ReactNode {
+  const { t, reloadSeq } = props
+  const [budget, setBudget] = useState<BudgetState>({ status: 'pending' })
+  const [attempt, setAttempt] = useState(0)
+
+  useEffect(() => {
+    let alive = true
+    setBudget({ status: 'pending' })
+    api.budget().then(
+      payload => { if (alive) setBudget({ status: 'ok', payload }) },
+      () => { if (alive) setBudget({ status: 'failed' }) },
+    )
+    return () => {
+      alive = false
+    }
+  }, [reloadSeq, attempt])
+
+  /** Swap the card's payload for the fresh forecast a save answered. */
+  const onSaved = (payload: BudgetPayload): void => {
+    setBudget({ status: 'ok', payload })
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <BudgetCard t={t} budget={budget} onSaved={onSaved} />
+    </div>
   )
 }
 
