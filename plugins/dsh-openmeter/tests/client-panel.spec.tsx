@@ -170,11 +170,11 @@ const ok = (payload: unknown): Responder => ({ ok: true, payload })
 
 /** Route fetch by URL prefix; each route plays its scripted responses in order, repeating the last. */
 function stubFetch(script: { status?: Responder[], summary?: Responder[], usage?: Responder[], meUsage?: Responder[], budget?: Responder[] }): {
-  counts: { status: number, summary: number, usage: number, meUsage: number, budget: number }
+  counts: { status: number, summary: number, usage: number, meUsage: number, budget: number, customers: number, bindings: number }
   meUsageUrls: string[]
   budgetRequests: Array<{ method: string, body: string }>
 } {
-  const counts = { status: 0, summary: 0, usage: 0, meUsage: 0, budget: 0 }
+  const counts = { status: 0, summary: 0, usage: 0, meUsage: 0, budget: 0, customers: 0, bindings: 0 }
   const meUsageUrls: string[] = []
   const budgetRequests: Array<{ method: string, body: string }> = []
   const fetchMock = vi.fn(async (input: unknown, init?: { method?: string, body?: string }): Promise<{ ok: boolean, json: () => Promise<unknown> }> => {
@@ -199,6 +199,12 @@ function stubFetch(script: { status?: Responder[], summary?: Responder[], usage?
     } else if (url.startsWith('/api/openmeter/usage')) {
       responder = pick(script.usage, counts.usage)
       counts.usage += 1
+    } else if (url.startsWith('/api/openmeter/operator/customers')) {
+      responder = pick(script.customers, counts.customers)
+      counts.customers += 1
+    } else if (url.startsWith('/api/openmeter/operator/bindings')) {
+      responder = pick(script.bindings, counts.bindings)
+      counts.bindings += 1
     } else if (url.startsWith('/api/openmeter/status')) {
       responder = pick(script.status, counts.status)
       counts.status += 1
@@ -435,7 +441,9 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
     })
     renderPanel()
     fireEvent.click(await screen.findByText(t('overview.detail')))
-    expect(await screen.findByText(t('detail.title'))).toBeTruthy()
+    // The tab and the detail header share the 用量明细 copy; the filter
+    // controls only exist inside the detail view.
+    expect(await screen.findByText(t('detail.apply'))).toBeTruthy()
     expect(counts.meUsage).toBe(1)
     // The bare URL pins the whole default query: no subject, no limit, no params at all.
     expect(meUsageUrls[0]).toBe('/api/openmeter/me/usage')
@@ -844,8 +852,107 @@ describe('BillingPanel budget card and editor (tenant surface)', () => {
     })
     renderPanel()
     expect(await screen.findByText(t('budget.progress', { budget: '¥100.00', spent: '¥50.00' }))).toBeTruthy()
-    expect(screen.getByText(t('budget.title')).closest('div')?.style.flexWrap).toBe('wrap')
+    // The 月度预算 copy now also labels the navigation tab; the card's own
+    // title is the heading element.
+    const cardTitle = screen.getAllByText(t('budget.title')).find(el => el.tagName === 'H4')
+    expect(cardTitle?.closest('div')?.style.flexWrap).toBe('wrap')
     expect(screen.getByText(t('budget.progress', { budget: '¥100.00', spent: '¥50.00' })).closest('div')?.style.flexWrap).toBe('wrap')
     expect(screen.getByText(t('budget.near', { projected: '¥80.00', budget: '¥100.00' })).closest('div')?.style.flexWrap).toBe('wrap')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Issue #10 (租户导航清理): navigation derives from the authenticated
+// capability set; operator surfaces stay out of the tenant surface, and the
+// hidden entries remain server-guarded (the client only ever degrades).
+// ---------------------------------------------------------------------------
+
+describe('BillingPanel navigation cleanup (issue #10)', () => {
+  /** A 403-shaped responder: the server's operator gate refusing a tenant. */
+  const forbidden = { ok: false, payload: { ok: false, error: 'forbidden' } }
+
+  it('hides the operator tabs, links, and config card from a plain tenant, with no error banner', async () => {
+    stubFetch({
+      status: [forbidden],
+      budget: [ok(makeBudget())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    render(<BillingPanel t={t} config={<div>CONFIG_CARD</div>} />)
+    expect(await screen.findByText(new RegExp(`${num(8000)} Token`))).toBeTruthy()
+    expect(screen.queryByText(t('panel.cashier'))).toBeNull()
+    expect(screen.queryByText(t('panel.settings'))).toBeNull()
+    expect(screen.queryByText('CONFIG_CARD')).toBeNull()
+    expect(screen.queryByText(t('panel.customers'))).toBeNull()
+    expect(screen.queryByText(t('panel.statusError'))).toBeNull()
+  })
+
+  it('keeps the three tenant entries for a plain tenant: overview, detail, budget', async () => {
+    stubFetch({
+      status: [forbidden],
+      budget: [ok(makeBudget())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    expect(await screen.findByText(new RegExp(`${num(8000)} Token`))).toBeTruthy()
+    // The navigation entries are buttons (the detail/budget copy also labels
+    // in-view headings, so select the tab by role).
+    expect(screen.getByRole('button', { name: t('panel.overview') })).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('detail.title') })).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('budget.title') })).toBeTruthy()
+  })
+
+  it('opens the budget entry as its own view with its own fetch', async () => {
+    const { counts } = stubFetch({
+      status: [forbidden],
+      budget: [ok(makeBudget())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    await screen.findByText(new RegExp(`${num(8000)} Token`))
+    const overviewBudgetFetches = counts.budget
+    fireEvent.click(screen.getByRole('button', { name: t('budget.title') }))
+    expect(await screen.findByText(t('budget.progress', { budget: '¥100.00', spent: '¥50.00' }))).toBeTruthy()
+    expect(counts.budget).toBe(overviewBudgetFetches + 1)
+  })
+
+  it('shows the operator tabs alongside the tenant entries for an operator, and mounts the config card on demand', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    render(<BillingPanel t={t} config={<div>CONFIG_CARD</div>} />)
+    expect(await screen.findByText(new RegExp(`${num(8000)} Token`))).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('panel.overview') })).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('detail.title') })).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('budget.title') })).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('panel.cashier') })).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('panel.settings') })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: t('panel.settings') }))
+    expect(await screen.findByText('CONFIG_CARD')).toBeTruthy()
+  })
+
+  it('degrades the cashier surface to a localized error when the operator routes reject (hidden entry stays server-guarded)', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+      customers: [forbidden],
+      bindings: [forbidden],
+    })
+    renderPanel()
+    await screen.findByText(new RegExp(`${num(8000)} Token`))
+    fireEvent.click(screen.getByRole('button', { name: t('panel.cashier') }))
+    // The view mounts for the authenticated operator but the rejected routes
+    // degrade to the localized error with zero customer data rendered — the
+    // server guard stays authoritative even on this side of the wire.
+    expect(await screen.findByText(t('panel.loadError'))).toBeTruthy()
+    expect(screen.queryByText(t('panel.recharge'))).toBeNull()
+    expect(screen.queryByText(t('panel.block'))).toBeNull()
   })
 })
