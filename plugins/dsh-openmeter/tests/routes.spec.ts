@@ -1125,6 +1125,31 @@ describe('mountRoutes /me/budget tenant route', () => {
     }
   })
 
+  it('publishes the caller role alongside the forecast: member GET false, manager GET and PUT true', async () => {
+    const { ledger, budgetStore } = await openBudgetStores()
+    try {
+      budgetStore.set('acme', 100)
+      const memberServer = fakeWebServer()
+      mountRoutes(memberServer.webServer, budgetDeps(authSeam({ identity: MEMBER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, ledger))
+      const memberGet = await dispatch(memberServer.handlers, 'GET', BUDGET_PATH)
+      expect(memberGet.status).toBe(200)
+      expect(JSON.parse(memberGet.body).canManageBudget).toBe(false)
+
+      const managerServer = fakeWebServer()
+      mountRoutes(managerServer.webServer, budgetDeps(authSeam({ identity: MANAGER, subjects: SUBJECTS_WITH_GLOBEX }), budgetStore, ledger))
+      const managerGet = await dispatch(managerServer.handlers, 'GET', BUDGET_PATH)
+      expect(managerGet.status).toBe(200)
+      expect(JSON.parse(managerGet.body).canManageBudget).toBe(true)
+
+      const managerPut = await dispatch(managerServer.handlers, 'PUT', BUDGET_PATH, '{"monthlyBudgetCny":120.5}')
+      expect(managerPut.status).toBe(200)
+      expect(JSON.parse(managerPut.body).canManageBudget).toBe(true)
+    } finally {
+      ledger.close()
+      budgetStore.close()
+    }
+  })
+
   it('rejects a member PUT with 403 forbidden and writes nothing', async () => {
     const { ledger, budgetStore } = await openBudgetStores()
     try {

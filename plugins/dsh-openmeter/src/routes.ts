@@ -563,7 +563,9 @@ const BUDGET_MAX_CNY = 100_000_000
 
 /**
  * Load and write the caller's budget forecast — 200 with the forecast
- * spread after ok — or the opaque 503 when any seam read throws.
+ * spread after ok and `canManageBudget` (the client has no identity
+ * service, so the role reaches it only through this field) — or the
+ * opaque 503 when any seam read throws.
  * @param res - the response.
  * @param budget - the wired budget seam.
  * @param ledger - the wired usage-ledger seam.
@@ -586,7 +588,7 @@ function writeBudgetForecast(res: ServerResponse, budget: Pick<BudgetStore, 'get
         now: () => Date.now(),
       },
     )
-    writeJson(res, 200, { ok: true, ...forecast })
+    writeJson(res, 200, { ok: true, canManageBudget: policy.isTenantManager, ...forecast })
   } catch {
     // Any read failure across the two seams — a closed budget store,
     // sqlite, or the ledger — degrades to the same opaque 503; no

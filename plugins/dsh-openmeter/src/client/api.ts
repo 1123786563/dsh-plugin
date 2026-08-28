@@ -148,6 +148,8 @@ export interface UsageDetailQuery {
 export interface BudgetPayload {
   ok: boolean
   availability: 'ready' | 'unconfigured' | 'insufficient-history'
+  /** Whether the caller's policy grants budget writes (tenant-manager role). */
+  canManageBudget: boolean
   basis: { method: string, monthStartMs: number, monthEndMs: number, daysInMonth: number, daysElapsed: number, dataAsOfMs: number, currency: string, spendSource: string }
   /** Configured monthly budget in CNY; absent when unconfigured. */
   monthlyBudgetCny?: number
