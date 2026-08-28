@@ -19,8 +19,14 @@ export interface GatewayConfig {
   readonly publicUrl: URL
   /** The loopback-only dsh webserver everything is proxied into. */
   readonly upstream: URL
-  /** The casdoor OIDC issuer origin. */
+  /** The casdoor OIDC issuer origin browsers redirect to; iss/aud assertions use it. */
   readonly casdoorIssuer: URL
+  /**
+   * Base the gateway itself uses for casdoor discovery/token/JWKS requests;
+   * iss/aud assertions and browser redirects keep `casdoorIssuer`. Defaults
+   * to `casdoorIssuer` (no split: same origin, zero behavior difference).
+   */
+  readonly casdoorInternalIssuer: URL
   readonly casdoorClientId: string
   readonly casdoorClientSecret: string
   readonly cookieName: string
@@ -117,12 +123,15 @@ export function loadGatewayConfig(
     )
   }
   const home = env.HOME ?? process.cwd()
+  const casdoorIssuer = parseUrl(env.CASDOOR_ISSUER, 'http://127.0.0.1:8001', 'CASDOOR_ISSUER')
+  const casdoorInternalIssuer = parseUrl(env.CASDOOR_INTERNAL_ISSUER, casdoorIssuer.href, 'CASDOOR_INTERNAL_ISSUER')
   return {
     host: env.GATEWAY_HOST ?? '127.0.0.1',
     port: parseInt_(env.GATEWAY_PORT, 'GATEWAY_PORT', 3080),
     publicUrl: parseUrl(env.GATEWAY_PUBLIC_URL, 'http://127.0.0.1:3080', 'GATEWAY_PUBLIC_URL'),
     upstream: parseUrl(env.DSH_UPSTREAM_URL, 'http://127.0.0.1:38080', 'DSH_UPSTREAM_URL'),
-    casdoorIssuer: parseUrl(env.CASDOOR_ISSUER, 'http://127.0.0.1:8001', 'CASDOOR_ISSUER'),
+    casdoorIssuer,
+    casdoorInternalIssuer,
     casdoorClientId,
     casdoorClientSecret,
     cookieName: env.GATEWAY_COOKIE_NAME ?? 'dsh_sid',

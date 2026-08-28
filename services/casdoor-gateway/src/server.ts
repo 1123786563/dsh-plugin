@@ -201,6 +201,7 @@ export async function main(): Promise<void> {
   const issuer = new IdentityIssuer(config.dataDir)
   const oidc = new CasdoorOidc({
     issuer: config.casdoorIssuer,
+    internalIssuer: config.casdoorInternalIssuer,
     clientId: config.casdoorClientId,
     clientSecret: config.casdoorClientSecret,
     redirectUri: new URL('/casdoor/callback', config.publicUrl),
@@ -237,6 +238,11 @@ export async function main(): Promise<void> {
   app.log.info(
     `dsh-casdoor-gateway: http://${config.host}:${String(config.port)} → ${config.upstream.href} (casdoor ${config.casdoorIssuer.href})`,
   )
+  if (config.casdoorInternalIssuer.href !== config.casdoorIssuer.href) {
+    app.log.info(
+      `casdoor discovery via ${config.casdoorInternalIssuer.href} (browser issuer stays ${config.casdoorIssuer.href})`,
+    )
+  }
   const purge = setInterval(() => {
     try {
       store.purgeExpired()

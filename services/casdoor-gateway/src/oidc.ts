@@ -31,7 +31,10 @@ interface PendingLogin {
 }
 
 export interface CasdoorOidcOptions {
+  /** Public casdoor issuer: iss/aud assertions and browser-facing authorize/logout URLs. */
   readonly issuer: URL
+  /** Base the gateway itself uses for discovery/token/JWKS requests (the config layer defaults it to `issuer`). */
+  readonly internalIssuer: URL
   readonly clientId: string
   readonly clientSecret: string
   readonly redirectUri: URL
@@ -98,21 +101,50 @@ export class CasdoorOidc implements OidcClient {
 
   private configuration(): Promise<oidc.Configuration> {
     this.discoveryPromise ??= oidc.discovery(
-      this.options.issuer,
+      // An explicit well-known URL skips openid-client's issuer-match check
+      // (it only matches when the passed URL lacks /.well-known/), letting
+      // discovery run against the internal base while the metadata still
+      // names the public issuer — asserted below.
+      new URL('/.well-known/openid-configuration', this.options.internalIssuer),
       this.options.clientId,
       this.options.clientSecret,
       undefined,
       INSECURE,
-    )
+    ).then(conf => {
+      // href on both sides normalizes the trailing slash (URL.href appends
+      // one to the empty path; casdoor's iss carries none), so equivalent
+      // spellings pass and only a genuinely different issuer fails loud.
+      const discovered = new URL(conf.serverMetadata().issuer).href
+      const expected = new URL(this.issuerString).href
+      if (discovered !== expected) {
+        throw new LoginError(
+          `casdoor discovery metadata issuer ${JSON.stringify(discovered)} does not match the configured CASDOOR_ISSUER ${JSON.stringify(expected)}; the CASDOOR_INTERNAL_ISSUER base must serve the public issuer's metadata`,
+        )
+      }
+      return conf
+    })
     return this.discoveryPromise
+  }
+
+  /**
+   * Move an IdP URL pinned to the public issuer origin onto the internal
+   * base (same path and query): casdoor's discovery hardcodes absolute
+   * endpoints to the public origin, so the gateway's own token/JWKS traffic
+   * follows the internal base while browsers keep the public origin.
+   */
+  private internalize(url: URL): URL {
+    if (url.origin === this.options.issuer.origin && this.options.internalIssuer.origin !== this.options.issuer.origin) {
+      return new URL(`${url.pathname}${url.search}`, this.options.internalIssuer)
+    }
+    return url
   }
 
   private async verifyKey(): Promise<JWTVerifyGetKey> {
     const conf = await this.configuration()
     const jwksUri = conf.serverMetadata().jwks_uri
     const url = jwksUri !== undefined && jwksUri.length > 0
-      ? new URL(jwksUri)
-      : new URL('/.well-known/jwks', this.options.issuer)
+      ? this.internalize(new URL(jwksUri))
+      : new URL('/.well-known/jwks', this.options.internalIssuer)
     this.jwksKey ??= createRemoteJWKSet(url, { cooldownDuration: 30_000 })
     return this.jwksKey
   }
@@ -176,7 +208,7 @@ export class CasdoorOidc implements OidcClient {
     if (tokenEndpointHref === undefined || tokenEndpointHref.length === 0) {
       throw new LoginError('casdoor discovery returned no token_endpoint')
     }
-    const tokenEndpoint = new URL(tokenEndpointHref)
+    const tokenEndpoint = this.internalize(new URL(tokenEndpointHref))
     const body = new URLSearchParams({
       grant_type: 'authorization_code',
       client_id: this.options.clientId,
