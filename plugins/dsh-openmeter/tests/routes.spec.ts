@@ -37,6 +37,10 @@ afterEach(async () => {
 const ROUTES = [
   '/api/openmeter/status',
   '/api/openmeter/usage',
+  '/api/openmeter/operator/customers',
+  '/api/openmeter/operator/grants',
+  '/api/openmeter/operator/block',
+  '/api/openmeter/operator/bindings',
   '/api/openmeter/customers',
   '/api/openmeter/grants',
   '/api/openmeter/block',
@@ -194,7 +198,7 @@ describe('mountRoutes tenant policy gate', () => {
     const server = fakeWebServer()
     const { deps, calls } = fakeDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS }))
     mountRoutes(server.webServer, deps)
-    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/customers')
+    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/operator/customers')
     expect(result.status).toBe(403)
     expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'forbidden' })
     expect(calls).toEqual([])
@@ -204,7 +208,7 @@ describe('mountRoutes tenant policy gate', () => {
     const server = fakeWebServer()
     const { deps, calls } = fakeDeps(authSeam({ identity: ACME_MANAGER, subjects: SUBJECTS }))
     mountRoutes(server.webServer, deps)
-    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/customers')
+    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/operator/customers')
     expect(result.status).toBe(403)
     expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'forbidden' })
     expect(calls).toEqual([])
@@ -216,7 +220,7 @@ describe('mountRoutes tenant policy gate', () => {
     const memberServer = fakeWebServer()
     const member = fakeDeps(authSeam({ identity: ACME_MEMBER, subjects: SUBJECTS }))
     mountRoutes(memberServer.webServer, member.deps)
-    const memberResult = await dispatch(memberServer.handlers, 'POST', '/api/openmeter/grants', grant)
+    const memberResult = await dispatch(memberServer.handlers, 'POST', '/api/openmeter/operator/grants', grant)
     expect(memberResult.status).toBe(403)
     expect(JSON.parse(memberResult.body)).toEqual({ ok: false, error: 'forbidden' })
     expect(member.calls).toEqual([])
@@ -224,7 +228,7 @@ describe('mountRoutes tenant policy gate', () => {
     const managerServer = fakeWebServer()
     const manager = fakeDeps(authSeam({ identity: ACME_MANAGER, subjects: SUBJECTS }))
     mountRoutes(managerServer.webServer, manager.deps)
-    const managerResult = await dispatch(managerServer.handlers, 'POST', '/api/openmeter/grants', grant)
+    const managerResult = await dispatch(managerServer.handlers, 'POST', '/api/openmeter/operator/grants', grant)
     expect(managerResult.status).toBe(403)
     expect(JSON.parse(managerResult.body)).toEqual({ ok: false, error: 'forbidden' })
     expect(manager.calls).toEqual([])
@@ -232,9 +236,12 @@ describe('mountRoutes tenant policy gate', () => {
     const operatorServer = fakeWebServer()
     const operator = fakeDeps(authSeam({ identity: OPERATOR, subjects: SUBJECTS }))
     mountRoutes(operatorServer.webServer, operator.deps)
-    const operatorResult = await dispatch(operatorServer.handlers, 'POST', '/api/openmeter/grants', grant)
+    const operatorResult = await dispatch(operatorServer.handlers, 'POST', '/api/openmeter/operator/grants', grant)
     expect(operatorResult.status).toBe(201)
-    expect(JSON.parse(operatorResult.body)).toEqual({ ok: true })
+    expect(JSON.parse(operatorResult.body)).toEqual({
+      ok: true,
+      audit: { action: 'grant.create', target: 'cust-globex', at: expect.any(Number), actor: { tenantId: 'dsh-ops', userId: 'root' } },
+    })
     expect(operator.calls).toEqual([{
       method: 'createGrant',
       args: ['cust-globex', 'dsh_llm', { amount: 1, effectiveAt: expect.any(String) }],
@@ -245,7 +252,7 @@ describe('mountRoutes tenant policy gate', () => {
     const server = fakeWebServer()
     const { deps, calls } = fakeDeps(authSeam({ identity: OPERATOR, subjects: SUBJECTS }))
     mountRoutes(server.webServer, deps)
-    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/customers')
+    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/operator/customers')
     expect(result.status).toBe(200)
     const body = JSON.parse(result.body)
     expect(body.ok).toBe(true)
@@ -259,7 +266,7 @@ describe('mountRoutes tenant policy gate', () => {
     const visitor: RouteIdentity = { tenantId: 'globex', userId: 'bob', displayName: 'Bob', roles: ['owner', 'dsh-admin'] }
     const { deps } = fakeDeps(authSeam({ identity: visitor, subjects: SUBJECTS }))
     mountRoutes(server.webServer, deps)
-    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/customers')
+    const result = await dispatch(server.handlers, 'GET', '/api/openmeter/operator/customers')
     expect(result.status).toBe(403)
     expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'tenant-unmapped' })
 
@@ -267,7 +274,7 @@ describe('mountRoutes tenant policy gate', () => {
     const empty = fakeWebServer()
     const emptyDeps = fakeDeps(authSeam({ identity: OPERATOR, subjects: {} }))
     mountRoutes(empty.webServer, emptyDeps.deps)
-    const emptyResult = await dispatch(empty.handlers, 'GET', '/api/openmeter/customers')
+    const emptyResult = await dispatch(empty.handlers, 'GET', '/api/openmeter/operator/customers')
     expect(emptyResult.status).toBe(403)
     expect(JSON.parse(emptyResult.body)).toEqual({ ok: false, error: 'tenant-unmapped' })
   })
@@ -323,10 +330,10 @@ describe('mountRoutes tenant policy gate', () => {
     const routeCases: Array<{ method: string, path: string, body?: string }> = [
       { method: 'GET', path: '/api/openmeter/status' },
       { method: 'GET', path: '/api/openmeter/usage' },
-      { method: 'GET', path: '/api/openmeter/customers' },
-      { method: 'POST', path: '/api/openmeter/grants', body: JSON.stringify({ customerKey: 'cust-acme', amount: 1 }) },
-      { method: 'POST', path: '/api/openmeter/block', body: JSON.stringify({ customerKey: 'cust-acme', blocked: true }) },
-      { method: 'GET', path: '/api/openmeter/bindings' },
+      { method: 'GET', path: '/api/openmeter/operator/customers' },
+      { method: 'POST', path: '/api/openmeter/operator/grants', body: JSON.stringify({ customerKey: 'cust-acme', amount: 1 }) },
+      { method: 'POST', path: '/api/openmeter/operator/block', body: JSON.stringify({ customerKey: 'cust-acme', blocked: true }) },
+      { method: 'GET', path: '/api/openmeter/operator/bindings' },
     ]
     const identities: Array<{ label: string, seam: () => RouteAuth, status: number, error: string }> = [
       { label: 'no identity', seam: () => authSeam({ subjects: SUBJECTS }), status: 401, error: 'unauthenticated' },

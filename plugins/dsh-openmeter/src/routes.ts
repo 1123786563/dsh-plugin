@@ -1,12 +1,19 @@
 /**
- * Host routes for the cashier panel and usage panel (browser half), all under
- * /api/openmeter/*, guarded loopback+same-origin. Read routes are GET; the
- * cashier's writes (customers, grants, blocks, bindings) are POST.
+ * Host routes under /api/openmeter/*, guarded loopback+same-origin:
+ * the status/usage health snapshots, the operator cashier surfaces under
+ * /operator/* (customers, grants, blocks, bindings — GET reads, POST
+ * writes), the tenant self-service surfaces under /me/*, and the retired
+ * global cashier paths, which answer a stable 410 naming their operator
+ * replacement for every method and caller.
  *
- * Every cashier route is an operator surface: when an auth seam is wired the
- * request must resolve to an operator policy (loopback guard → verified
- * identity → resolvable tenant policy → isOperator) before any OpenMeter call
- * or store read; with no seam the stock loopback-guarded behavior is unchanged.
+ * Every /operator route is an operator surface: when an auth seam is wired
+ * the request must resolve to an operator policy (loopback guard → verified
+ * identity → resolvable tenant policy → isOperator) before any OpenMeter
+ * call or store read; with no seam the stock loopback-guarded behavior is
+ * unchanged. Each accepted operator mutation appends an `audit` record
+ * (action, target, at) whose `actor` is present only when the seam resolved
+ * the operator's policy — never fabricated on the stock path. GET reads
+ * carry no audit.
  *
  * The tenant surfaces are /me/summary, /me/usage, and /me/budget: any
  * authenticated member of a mapped tenant (no role requirement) reads only
@@ -142,21 +149,105 @@ export async function requireOperatorPolicy(req: IncomingMessage, res: GuardedRe
 }
 
 /**
- * The shared route gate: loopback trust first, then (when the seam is live)
- * an operator policy — both before any OpenMeter call or store read. The
- * gate applies only when an auth seam is wired AND reports its identity
- * source live for this request; stock deployments (no seam, or the identity
- * service absent at request time) take the compatibility path.
+ * The shared operator route gate: loopback trust first, then (when the seam
+ * is live) an operator policy — both before any OpenMeter call or store
+ * read. The gate applies only when an auth seam is wired AND reports its
+ * identity source live for this request; stock deployments (no seam, or the
+ * identity service absent at request time) take the compatibility path.
  * @param req - the incoming request.
  * @param res - the response.
  * @param deps - the wired collaborators.
- * @returns false when the response was already written.
+ * @returns the resolved operator policy, undefined on the stock compatibility
+ * path (no live seam, so no actor for audit), or null once the error
+ * response was written.
  */
-async function authorizeOperator(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<boolean> {
-  if (guard(req, res)) return false
+async function authorizeOperator(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<TenantPolicy | undefined | null> {
+  if (guard(req, res)) return null
   const auth = deps.auth
-  if (auth === undefined || !(auth.available?.() ?? true)) return true
-  return (await requireOperatorPolicy(req, res, auth)) !== null
+  if (auth === undefined || !(auth.available?.() ?? true)) return undefined
+  return await requireOperatorPolicy(req, res, auth)
+}
+
+/** Explicit target kinds requireTarget validates: a customer key, or a preset binding pair. */
+export type TargetKind = 'customer' | 'binding'
+
+/** One binding target: the preset plus the customer key — an empty key unbinds. */
+export interface BindingTarget {
+  readonly presetId: string
+  readonly customerKey: string
+}
+
+/** requireTarget outcome: the validated explicit target, or the bare failure. */
+export type TargetResult<T = string | BindingTarget> = { ok: true, target: T } | { ok: false }
+
+/**
+ * One trimmed string field of a mutation body, or the empty string for an
+ * absent/non-string value.
+ * @param value - the raw decoded body value.
+ */
+function trimmedField(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/**
+ * Parse and validate the explicit target field(s) of one mutation operator
+ * body: 'customer' names a required customerKey (grant, block); 'binding'
+ * names a required presetId plus an optional customerKey (empty unbinds).
+ * Validation only — the caller keeps its own verbatim 400 error code, and
+ * non-target fields (e.g. a grant's amount) stay the caller's to check.
+ * @param body - the decoded mutation body.
+ * @param kind - which target shape the body must carry.
+ * @returns the validated target, or { ok: false } when it is missing or blank.
+ */
+export function requireTarget(body: Record<string, unknown>, kind: 'customer'): TargetResult<string>
+export function requireTarget(body: Record<string, unknown>, kind: 'binding'): TargetResult<BindingTarget>
+export function requireTarget(body: Record<string, unknown>, kind: TargetKind): TargetResult {
+  if (kind === 'binding') {
+    const presetId = trimmedField(body.presetId)
+    if (presetId.length === 0) return { ok: false }
+    return { ok: true, target: { presetId, customerKey: trimmedField(body.customerKey) } }
+  }
+  const customerKey = trimmedField(body.customerKey)
+  return customerKey.length === 0 ? { ok: false } : { ok: true, target: customerKey }
+}
+
+/** Operator mutation actions that carry an audit record. */
+export type AuditAction = 'customer.create' | 'grant.create' | 'block.set' | 'binding.set'
+
+/** The audited target: a customer key string, or the preset+customer pair of a binding. */
+export type AuditTarget = string | BindingTarget
+
+/** The accountable principal, present only when the seam resolved the operator's policy. */
+export interface AuditActor {
+  readonly tenantId: string
+  readonly userId: string
+}
+
+/** The audit record appended to every accepted operator mutation response. */
+export interface AuditRecord {
+  readonly action: AuditAction
+  readonly target: AuditTarget
+  /** Epoch milliseconds from the route's real clock. */
+  readonly at: number
+  readonly actor?: AuditActor
+}
+
+/**
+ * Build one audit record for an accepted operator mutation. `operator` is the
+ * policy the seam resolved for the request; the stock loopback path passes
+ * undefined, which omits `actor` — an identity is never fabricated.
+ * @param action - the accepted mutation action.
+ * @param target - the validated explicit target.
+ * @param operator - the resolved operator policy, or undefined on the stock path.
+ * @returns the audit record for the success response.
+ */
+function auditRecord(action: AuditAction, target: AuditTarget, operator: TenantPolicy | undefined): AuditRecord {
+  return {
+    action,
+    target,
+    at: Date.now(),
+    ...(operator === undefined ? {} : { actor: { tenantId: operator.tenantId, userId: operator.principal } }),
+  }
 }
 
 /**
@@ -218,13 +309,15 @@ export function mountRoutes(webServer: WebServerLike, deps: RouteDeps): Disposer
 
   route('/api/openmeter/usage', (req, res) => handleUsage(req, res, deps))
 
-  route('/api/openmeter/customers', (req, res) => handleCustomers(req, res, deps))
+  // Operator cashier surfaces: same methods, bodies, and success payloads as
+  // the retired global paths, behind the operator policy gate.
+  route('/api/openmeter/operator/customers', (req, res) => handleCustomers(req, res, deps))
 
-  route('/api/openmeter/grants', (req, res) => handleGrant(req, res, deps))
+  route('/api/openmeter/operator/grants', (req, res) => handleGrant(req, res, deps))
 
-  route('/api/openmeter/block', (req, res) => handleBlock(req, res, deps))
+  route('/api/openmeter/operator/block', (req, res) => handleBlock(req, res, deps))
 
-  route('/api/openmeter/bindings', (req, res) => handleBindings(req, res, deps))
+  route('/api/openmeter/operator/bindings', (req, res) => handleBindings(req, res, deps))
 
   route('/api/openmeter/me/summary', (req, res) => handleMeSummary(req, res, deps))
 
@@ -232,16 +325,37 @@ export function mountRoutes(webServer: WebServerLike, deps: RouteDeps): Disposer
 
   route('/api/openmeter/me/budget', (req, res) => handleMeBudget(req, res, deps))
 
+  // Retired global cashier paths: no compatibility alias, a stable 410.
+  route('/api/openmeter/customers', (_req, res) => writeMigrated(res, 'customers'))
+
+  route('/api/openmeter/grants', (_req, res) => writeMigrated(res, 'grants'))
+
+  route('/api/openmeter/block', (_req, res) => writeMigrated(res, 'block'))
+
+  route('/api/openmeter/bindings', (_req, res) => writeMigrated(res, 'bindings'))
+
   return () => {
     for (const dispose of disposers.splice(0)) dispose()
   }
 }
 
 /**
+ * The retired global cashier paths' stable answer: a 410 naming the operator
+ * replacement. Deliberately unconditional — no loopback guard, no auth seam,
+ * no store or OpenMeter access — so every method, caller, and target gets
+ * the same bytes and the answer leaks nothing.
+ * @param res - the response.
+ * @param segment - the operator path segment the route moved to.
+ */
+function writeMigrated(res: ServerResponse, segment: string): void {
+  writeJson(res, 410, { ok: false, error: 'route-migrated', to: `/api/openmeter/operator/${segment}` })
+}
+
+/**
  * GET: plugin and stack health snapshot.
  */
 async function handleStatus(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (!(await authorizeOperator(req, res, deps))) return
+  if ((await authorizeOperator(req, res, deps)) === null) return
   if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
   const config = deps.getConfig()
   writeJson(res, 200, {
@@ -263,7 +377,7 @@ async function handleStatus(req: IncomingMessage, res: ServerResponse, deps: Rou
  * GET: recent usage rows and month-to-date aggregates.
  */
 async function handleUsage(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (!(await authorizeOperator(req, res, deps))) return
+  if ((await authorizeOperator(req, res, deps)) === null) return
   if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
   const url = new URL(req.url ?? '/', 'http://dsh.internal')
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 100) || 100, 1), 500)
@@ -272,9 +386,11 @@ async function handleUsage(req: IncomingMessage, res: ServerResponse, deps: Rout
 
 /**
  * GET: customers + local binding/balance/block view. POST: create customer.
+ * Served under /operator/customers.
  */
 async function handleCustomers(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (!(await authorizeOperator(req, res, deps))) return
+  const operator = await authorizeOperator(req, res, deps)
+  if (operator === null) return
   const config = deps.getConfig()
   try {
     if (req.method === 'POST') {
@@ -285,7 +401,7 @@ async function handleCustomers(req: IncomingMessage, res: ServerResponse, deps: 
         return writeJson(res, 400, { ok: false, error: 'invalid-key' })
       }
       const created = await deps.client().createCustomer(key, name)
-      return writeJson(res, 201, { ok: true, customer: created })
+      return writeJson(res, 201, { ok: true, customer: created, audit: auditRecord('customer.create', key, operator) })
     }
     if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
     const customers = await deps.client().listCustomers()
@@ -319,62 +435,69 @@ async function handleCustomers(req: IncomingMessage, res: ServerResponse, deps: 
 }
 
 /**
- * POST a recharge grant: {customerKey, amount}.
+ * POST a recharge grant: {customerKey, amount}. Served under
+ * /operator/grants. Intentionally non-idempotent: two grants are two
+ * recharges.
  */
 async function handleGrant(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (!(await authorizeOperator(req, res, deps))) return
+  const operator = await authorizeOperator(req, res, deps)
+  if (operator === null) return
   if (req.method !== 'POST') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
   try {
     const body = asRecord(await readJsonBody(req))
-    const customerKey = typeof body.customerKey === 'string' ? body.customerKey.trim() : ''
     const amount = Number(body.amount)
-    if (customerKey.length === 0 || !Number.isFinite(amount) || amount <= 0) {
+    const target = requireTarget(body, 'customer')
+    if (!target.ok || !Number.isFinite(amount) || amount <= 0) {
       return writeJson(res, 400, { ok: false, error: 'invalid-grant' })
     }
-    await deps.client().createGrant(customerKey, deps.getConfig().featureKey, {
+    await deps.client().createGrant(target.target, deps.getConfig().featureKey, {
       amount,
       effectiveAt: new Date().toISOString(),
     })
-    await deps.gate.refreshNow([customerKey])
-    writeJson(res, 201, { ok: true })
+    await deps.gate.refreshNow([target.target])
+    writeJson(res, 201, { ok: true, audit: auditRecord('grant.create', target.target, operator) })
   } catch (error) {
     writeJson(res, 502, { ok: false, error: describe(error) })
   }
 }
 
 /**
- * POST a manual block/unblock: {customerKey, blocked}.
+ * POST a manual block/unblock: {customerKey, blocked}. Served under
+ * /operator/block. An idempotent set: the same value twice succeeds twice.
  */
 async function handleBlock(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (!(await authorizeOperator(req, res, deps))) return
+  const operator = await authorizeOperator(req, res, deps)
+  if (operator === null) return
   if (req.method !== 'POST') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
   try {
     const body = asRecord(await readJsonBody(req))
-    const customerKey = typeof body.customerKey === 'string' ? body.customerKey.trim() : ''
+    const target = requireTarget(body, 'customer')
+    if (!target.ok) return writeJson(res, 400, { ok: false, error: 'invalid-customer' })
     const blocked = body.blocked === true
-    if (customerKey.length === 0) return writeJson(res, 400, { ok: false, error: 'invalid-customer' })
-    await deps.store.setManualBlock(customerKey, blocked)
-    await deps.gate.refreshNow([customerKey])
-    writeJson(res, 200, { ok: true })
+    await deps.store.setManualBlock(target.target, blocked)
+    await deps.gate.refreshNow([target.target])
+    writeJson(res, 200, { ok: true, audit: auditRecord('block.set', target.target, operator) })
   } catch (error) {
     writeJson(res, 500, { ok: false, error: describe(error) })
   }
 }
 
 /**
- * GET: bindings + observed presets. POST: set one binding {presetId, customerKey}.
+ * GET: bindings + observed presets. POST: set one binding {presetId,
+ * customerKey} (empty customerKey unbinds). Served under /operator/bindings.
+ * An idempotent set: the same pair twice succeeds twice.
  */
 async function handleBindings(req: IncomingMessage, res: ServerResponse, deps: RouteDeps): Promise<void> {
-  if (!(await authorizeOperator(req, res, deps))) return
+  const operator = await authorizeOperator(req, res, deps)
+  if (operator === null) return
   try {
     if (req.method === 'POST') {
       const body = asRecord(await readJsonBody(req))
-      const presetId = typeof body.presetId === 'string' ? body.presetId.trim() : ''
-      const customerKey = typeof body.customerKey === 'string' ? body.customerKey.trim() : ''
-      if (presetId.length === 0) return writeJson(res, 400, { ok: false, error: 'invalid-preset' })
-      await deps.store.setBinding(presetId, customerKey)
-      if (customerKey.length > 0) await deps.gate.refreshNow([customerKey])
-      return writeJson(res, 200, { ok: true })
+      const target = requireTarget(body, 'binding')
+      if (!target.ok) return writeJson(res, 400, { ok: false, error: 'invalid-preset' })
+      await deps.store.setBinding(target.target.presetId, target.target.customerKey)
+      if (target.target.customerKey.length > 0) await deps.gate.refreshNow([target.target.customerKey])
+      return writeJson(res, 200, { ok: true, audit: auditRecord('binding.set', target.target, operator) })
     }
     if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
     const state = deps.store.snapshot()
