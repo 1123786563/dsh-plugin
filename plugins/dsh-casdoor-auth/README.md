@@ -45,6 +45,7 @@ pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
 | `gatewayJwksUrl` | `http://127.0.0.1:3080/.well-known/jwks.json` | 网关 JWKS（公钥公开） |
+| `identityPublicKey` | `''`（env `DSH_CASDOOR_IDENTITY_PUBLIC_KEY`） | 钉住的网关 Ed25519 公钥（PEM SPKI 或 JSON JWK 字符串）；非空时本地验签、不拉 JWKS（网关离线也可验），空则回退 JWKS。畸形物料在激活时大声失败，绝不静默降级 |
 | `identityHeader` | `x-dsh-identity` | DshIdentityToken 携带头 |
 | `issuer` / `audience` | `dsh-casdoor-gateway` / `dsh-casdoor-auth` | 令牌校验目标 |
 | `basePath` | `/_dsh-multi-tenant` | Web 桥挂载路径 |

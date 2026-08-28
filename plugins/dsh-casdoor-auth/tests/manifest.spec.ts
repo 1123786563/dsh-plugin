@@ -40,5 +40,6 @@ describe('cordis.patch.yml', () => {
     expect(patch).toContain('- id: casdoor-auth')
     expect(patch).toContain("name: dsh-casdoor-auth")
     expect(patch).toContain('DSH_CASDOOR_GATEWAY_JWKS_URL')
+    expect(patch).toContain("identityPublicKey: !!js process.env.DSH_CASDOOR_IDENTITY_PUBLIC_KEY ?? ''")
   })
 })

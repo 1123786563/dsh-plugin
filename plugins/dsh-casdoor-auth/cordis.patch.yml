@@ -24,4 +24,8 @@
       config:
         # Where the dsh process fetches the gateway's public signing keys.
         gatewayJwksUrl: !!js process.env.DSH_CASDOOR_GATEWAY_JWKS_URL ?? 'http://127.0.0.1:3080/.well-known/jwks.json'
+        # Pinned gateway Ed25519 public key (PEM SPKI or JSON JWK string).
+        # Set to verify identity tokens locally — the gateway may be offline;
+        # empty keeps the remote-JWKS behavior.
+        identityPublicKey: !!js process.env.DSH_CASDOOR_IDENTITY_PUBLIC_KEY ?? ''
         identityHeader: !!js process.env.DSH_CASDOOR_IDENTITY_HEADER ?? 'x-dsh-identity'
