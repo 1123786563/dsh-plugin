@@ -443,15 +443,15 @@ function BudgetCard(props: { t: T, budget: BudgetState, onSaved: (payload: Budge
 
 /**
  * The 预算 entry's own view (issue #10): the budget warning card mounted
- * standalone, fetching its own payload on mount, on every `reloadSeq` bump,
- * and on retry. A failed fetch degrades exactly like the overview's inline
- * card (the unavailable line, no editor) — never an operator surface.
+ * standalone, fetching its own payload on mount and on every `reloadSeq`
+ * bump (the manual refresh button is the retry path). A failed fetch
+ * degrades exactly like the overview's inline card (the unavailable line,
+ * no editor) — never an operator surface.
  * @param props - locale and the panel's refresh signal.
  */
 function BudgetView(props: { t: T, reloadSeq: number }): ReactNode {
   const { t, reloadSeq } = props
   const [budget, setBudget] = useState<BudgetState>({ status: 'pending' })
-  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let alive = true
@@ -463,7 +463,7 @@ function BudgetView(props: { t: T, reloadSeq: number }): ReactNode {
     return () => {
       alive = false
     }
-  }, [reloadSeq, attempt])
+  }, [reloadSeq])
 
   /** Swap the card's payload for the fresh forecast a save answered. */
   const onSaved = (payload: BudgetPayload): void => {
