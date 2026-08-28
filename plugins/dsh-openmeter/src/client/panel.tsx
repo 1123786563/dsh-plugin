@@ -1,6 +1,7 @@
 /**
  * The billing settings section (a top-level Settings page): the tenant 概览
- * (credit balance, runway, model cost distribution, detail CTA — no operator
+ * (credit balance, runway, the month-scoped budget warning card with its
+ * manager-only editor, model cost distribution, detail CTA — no operator
  * data) with its 用量明细 drill-down (mounted on first open, then kept alive
  * behind a display toggle so filters, rows, and the cursor survive
  * back-and-forth), plus the operator surfaces — 收银台 (customers, balances,
@@ -13,7 +14,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { api } from './api.ts'
-import type { BindingsPayload, CustomersPayload, PageStats, StatusPayload, SummaryPayload, UsageDetailRow, UsagePayload } from './api.ts'
+import type { BindingsPayload, BudgetPayload, CustomersPayload, PageStats, StatusPayload, SummaryPayload, UsageDetailRow, UsagePayload } from './api.ts'
+import { budgetCopy } from './budget-ui.ts'
+import type { BudgetCopyModel } from './budget-ui.ts'
 import { buildOverviewModel } from './overview.ts'
 import type { ModelRow } from './overview.ts'
 import { dictionary, format } from './locales.ts'
@@ -32,10 +35,14 @@ interface PanelState {
   busy: boolean
 }
 
-/** Overview view state: the two payloads plus the summary fetch error. */
+/** Budget card fetch state: pending, loaded, or failed — pending ≠ failed. */
+type BudgetState = { status: 'pending' } | { status: 'ok', payload: BudgetPayload } | { status: 'failed' }
+
+/** Overview view state: the two payloads, the budget tri-state, and the summary fetch error. */
 interface OverviewState {
   summary: SummaryPayload | undefined
   usage: UsagePayload | undefined
+  budget: BudgetState
   error: string | undefined
 }
 
@@ -147,20 +154,22 @@ function buildModelRows(usage: UsagePayload | undefined, subject: string): Model
 
 /**
  * The tenant overview: Token balance, runway, the 7-day aggregates, the
- * per-model cost distribution, and the detail CTA. Fetches its own summary +
- * usage on mount and on every `reloadSeq` bump; a failed usage fetch only
- * degrades the model table, while a failed summary fetch shows an error with
- * retry. Never renders operator data (customers, subjects, WAL counters).
+ * month-scoped budget warning card, the per-model cost distribution, and
+ * the detail CTA. Fetches its own summary + usage + budget on mount and on
+ * every `reloadSeq` bump; a failed usage fetch only degrades the model
+ * table, a failed budget fetch only degrades the budget card, while a
+ * failed summary fetch shows an error with retry. Never renders operator
+ * data (customers, subjects, WAL counters).
  * @param props - locale, the panel's refresh signal, the detail CTA target.
  */
 function OverviewView(props: { t: T, reloadSeq: number, onOpenDetail: () => void }): ReactNode {
   const { t, reloadSeq, onOpenDetail } = props
-  const [state, setState] = useState<OverviewState>({ summary: undefined, usage: undefined, error: undefined })
+  const [state, setState] = useState<OverviewState>({ summary: undefined, usage: undefined, budget: { status: 'pending' }, error: undefined })
   const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let alive = true
-    setState({ summary: undefined, usage: undefined, error: undefined })
+    setState({ summary: undefined, usage: undefined, budget: { status: 'pending' }, error: undefined })
     api.summary().then(
       summary => { if (alive) setState(previous => ({ ...previous, summary })) },
       () => { if (alive) setState(previous => ({ ...previous, summary: undefined, error: t('overview.error') })) },
@@ -169,10 +178,19 @@ function OverviewView(props: { t: T, reloadSeq: number, onOpenDetail: () => void
       usage => { if (alive) setState(previous => ({ ...previous, usage })) },
       () => { if (alive) setState(previous => ({ ...previous, usage: undefined })) },
     )
+    api.budget().then(
+      budget => { if (alive) setState(previous => ({ ...previous, budget: { status: 'ok', payload: budget } })) },
+      () => { if (alive) setState(previous => ({ ...previous, budget: { status: 'failed' } })) },
+    )
     return () => {
       alive = false
     }
   }, [reloadSeq, attempt, t])
+
+  /** Swap the budget card's payload for the fresh forecast a save answered. */
+  const onBudgetSaved = (payload: BudgetPayload): void => {
+    setState(previous => ({ ...previous, budget: { status: 'ok', payload } }))
+  }
 
   if (state.error !== undefined) {
     return (
@@ -210,6 +228,7 @@ function OverviewView(props: { t: T, reloadSeq: number, onOpenDetail: () => void
       <div style={actionsStyle}>
         <button type="button" style={buttonStyle} onClick={onOpenDetail}>{t('overview.detail')}</button>
       </div>
+      <BudgetCard t={t} budget={state.budget} onSaved={onBudgetSaved} />
       {empty
         ? <p style={{ ...mutedStyle, margin: 0 }}>{t('overview.empty')}</p>
         : (
@@ -249,6 +268,145 @@ function OverviewView(props: { t: T, reloadSeq: number, onOpenDetail: () => void
           </>
           )}
     </div>
+  )
+}
+
+/**
+ * The tone line copy: money strings interpolated from the Task-1 view
+ * model. The `unavailable` tone keeps its two causes distinct — a failed
+ * fetch and an `insufficient-history` month render different text in the
+ * same muted styling.
+ * @param t - locale reader.
+ * @param copy - the Task-1 budget view model.
+ * @param payload - the fetched payload; undefined when the fetch failed.
+ * @returns the localized tone line.
+ */
+function budgetToneLine(t: T, copy: BudgetCopyModel, payload: BudgetPayload | undefined): string {
+  switch (copy.tone) {
+    case 'over':
+      return t('budget.over', { projected: copy.projected ?? '', budget: copy.budget ?? '', overage: copy.overage ?? '' })
+    case 'near':
+      return t('budget.near', { projected: copy.projected ?? '', budget: copy.budget ?? '' })
+    case 'under':
+      return t('budget.under', { projected: copy.projected ?? '', budget: copy.budget ?? '' })
+    case 'unconfigured':
+      return t('budget.unconfigured')
+    case 'unavailable':
+      return payload?.availability === 'insufficient-history' ? t('budget.noHistory') : t('budget.unavailable')
+  }
+}
+
+/**
+ * The month-scoped budget warning card: budget-versus-spend progress with a
+ * capped bar, the month-end projection, and a tone-colored warning line,
+ * all from `budgetCopy` (Task 1). Managers (`canManageBudget`) get a
+ * one-field controlled editor: client-side validation mirrors the server
+ * contract (positive, ≤ 100000000, exact to 分) and never fetches when
+ * invalid; a valid save calls `api.setBudget` and swaps the card's payload
+ * for the fresh forecast the PUT answers. A failed fetch renders the
+ * unavailable line with no editor — no capability is known without a
+ * payload. Independent of the entitlement-driven overview rows.
+ * @param props - locale, the budget fetch state, and the save-success callback.
+ */
+function BudgetCard(props: { t: T, budget: BudgetState, onSaved: (payload: BudgetPayload) => void }): ReactNode {
+  const { t, budget, onSaved } = props
+  const payload = budget.status === 'ok' ? budget.payload : undefined
+  const copy = budgetCopy(payload)
+  const [editing, setEditing] = useState(false)
+  const [input, setInput] = useState('')
+  const [validationError, setValidationError] = useState(false)
+  const [saveError, setSaveError] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  /** Open the editor with the current budget at two decimals (empty when unconfigured); errors cleared. */
+  const open = (): void => {
+    setEditing(true)
+    setInput(payload?.monthlyBudgetCny === undefined ? '' : payload.monthlyBudgetCny.toFixed(2))
+    setValidationError(false)
+    setSaveError(false)
+  }
+
+  /** Close the editor, discarding the input and clearing errors. */
+  const close = (): void => {
+    setEditing(false)
+    setInput('')
+    setValidationError(false)
+    setSaveError(false)
+  }
+
+  /** Validate then save: an invalid amount never fetches; success swaps in the response and closes the form. */
+  const save = (): void => {
+    const amount = Number(input.trim())
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 100_000_000 || Math.round(amount * 100) < 1) {
+      setValidationError(true)
+      return
+    }
+    setValidationError(false)
+    setSaving(true)
+    api.setBudget(amount).then(
+      fresh => {
+        setSaving(false)
+        setEditing(false)
+        setSaveError(false)
+        onSaved(fresh)
+      },
+      () => {
+        setSaving(false)
+        setSaveError(true)
+      },
+    )
+  }
+
+  const toneStyle = copy.tone === 'over' ? warnStyle : copy.tone === 'near' ? attentionStyle : mutedStyle
+  return (
+    <section>
+      <div style={budgetRowStyle}>
+        <h4 style={{ ...hStyle, margin: 0 }}>{t('budget.title')}</h4>
+        {payload?.canManageBudget === true && !editing && (
+          <button type="button" style={buttonStyle} onClick={open}>
+            {payload.monthlyBudgetCny === undefined ? t('budget.configure') : t('budget.edit')}
+          </button>
+        )}
+      </div>
+      {budget.status === 'pending' && <div style={budgetRowStyle}><span style={mutedStyle}>…</span></div>}
+      {budget.status === 'failed' && <div style={{ ...budgetRowStyle, ...mutedStyle }}>{t('budget.unavailable')}</div>}
+      {budget.status === 'ok' && (
+        <>
+          {copy.progress !== null && (
+            <>
+              <div style={budgetRowStyle}>{t('budget.progress', { budget: copy.budget ?? '', spent: copy.spent })}</div>
+              <div style={budgetBarTrackStyle}>
+                <div style={{ ...budgetBarFillStyle, width: `${Math.round(copy.progress * 100)}%` }} />
+              </div>
+            </>
+          )}
+          {copy.tone !== 'unconfigured' && copy.projected !== null && (
+            <div style={budgetRowStyle}>{t('budget.projected', { projected: copy.projected })}</div>
+          )}
+          <div style={{ ...budgetRowStyle, ...toneStyle }}>{budgetToneLine(t, copy, payload)}</div>
+          {copy.tone === 'unconfigured' && (
+            <>
+              <div style={{ ...budgetRowStyle, ...mutedStyle }}>{t('budget.unconfiguredSpend', { spent: copy.spent })}</div>
+              {copy.projected !== null && (
+                <div style={{ ...budgetRowStyle, ...mutedStyle }}>{t('budget.unconfiguredProjected', { projected: copy.projected })}</div>
+              )}
+            </>
+          )}
+        </>
+      )}
+      {editing && (
+        <div style={budgetRowStyle}>
+          <label style={controlLabelStyle}>
+            {t('budget.field')}
+            <input style={inputStyle} value={input} onChange={event => { setInput(event.target.value) }} />
+          </label>
+          <button type="button" style={buttonStyle} disabled={saving} onClick={save}>{saving ? t('budget.saving') : t('budget.save')}</button>
+          <button type="button" style={buttonStyle} disabled={saving} onClick={close}>{t('budget.cancel')}</button>
+          {validationError && <span style={warnStyle}>{t('budget.invalidAmount')}</span>}
+          {saveError && <span style={warnStyle}>{t('budget.saveFailed')}</span>}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -506,6 +664,10 @@ const tdStyle: CSSProperties = { padding: '3px 6px', verticalAlign: 'middle' }
 const hStyle: CSSProperties = { margin: '4px 0', fontSize: 12 }
 const mutedStyle: CSSProperties = { opacity: 0.6 }
 const warnStyle: CSSProperties = { color: '#d2482d' }
+const attentionStyle: CSSProperties = { color: '#b8860b' }
+const budgetRowStyle: CSSProperties = { display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' }
+const budgetBarTrackStyle: CSSProperties = { width: '100%', height: 4, background: 'rgba(127,127,127,.2)', borderRadius: 2, overflow: 'hidden' }
+const budgetBarFillStyle: CSSProperties = { height: '100%', background: 'rgba(127,127,127,.55)' }
 const headlineStyle: CSSProperties = { display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }
 const actionsStyle: CSSProperties = { display: 'flex', gap: 6, flexWrap: 'wrap' }
 const balanceStyle: CSSProperties = { fontSize: 14, fontWeight: 600 }

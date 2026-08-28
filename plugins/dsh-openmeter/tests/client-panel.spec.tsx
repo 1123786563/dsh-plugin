@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BillingPanel } from '../src/client/panel.tsx'
-import type { PageStats, StatusPayload, SummaryPayload, UsageDetailPayload, UsageDetailRow, UsagePayload, UsageRowPayload } from '../src/client/api.ts'
+import type { BudgetPayload, PageStats, StatusPayload, SummaryPayload, UsageDetailPayload, UsageDetailRow, UsagePayload, UsageRowPayload } from '../src/client/api.ts'
 import { format, zh } from '../src/client/locales.ts'
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
@@ -115,6 +115,35 @@ function makeDetailPayload(overrides: { rows?: UsageDetailRow[], cursor?: string
   }
 }
 
+/**
+ * One budget payload mirroring the server union's per-availability field
+ * presence: `unconfigured` carries no budget or overage, and
+ * `insufficient-history` carries the budget without a projection.
+ */
+function makeBudget(overrides: {
+  availability?: BudgetPayload['availability']
+  canManageBudget?: boolean
+  monthlyBudgetCny?: number
+  monthToDateCny?: number
+  projectedMonthEndCny?: number
+  projectedOverageCny?: number
+} = {}): BudgetPayload {
+  const availability = overrides.availability ?? 'ready'
+  const budget = availability === 'unconfigured' ? undefined : overrides.monthlyBudgetCny ?? 100
+  const projected = availability === 'insufficient-history' ? undefined : overrides.projectedMonthEndCny ?? 80
+  const overage = availability === 'ready' ? overrides.projectedOverageCny ?? 0 : undefined
+  return {
+    ok: true,
+    availability,
+    ...(budget === undefined ? {} : { monthlyBudgetCny: budget }),
+    monthToDateCny: overrides.monthToDateCny ?? 50,
+    ...(projected === undefined ? {} : { projectedMonthEndCny: projected }),
+    ...(overage === undefined ? {} : { projectedOverageCny: overage }),
+    canManageBudget: overrides.canManageBudget ?? true,
+    basis: { method: 'linear-daily-average', monthStartMs: NOW, monthEndMs: NOW, daysInMonth: 31, daysElapsed: 15, dataAsOfMs: NOW, currency: 'CNY', spendSource: 'local-ledger-estimates' },
+  }
+}
+
 /** Local calendar label of an epoch, mirroring the client's day key. */
 const localDay = (at: number): string => {
   const date = new Date(at)
@@ -140,13 +169,15 @@ type Responder = { ok: boolean, payload: unknown } | { rejects: Error }
 const ok = (payload: unknown): Responder => ({ ok: true, payload })
 
 /** Route fetch by URL prefix; each route plays its scripted responses in order, repeating the last. */
-function stubFetch(script: { status?: Responder[], summary?: Responder[], usage?: Responder[], meUsage?: Responder[] }): {
-  counts: { status: number, summary: number, usage: number, meUsage: number }
+function stubFetch(script: { status?: Responder[], summary?: Responder[], usage?: Responder[], meUsage?: Responder[], budget?: Responder[] }): {
+  counts: { status: number, summary: number, usage: number, meUsage: number, budget: number }
   meUsageUrls: string[]
+  budgetRequests: Array<{ method: string, body: string }>
 } {
-  const counts = { status: 0, summary: 0, usage: 0, meUsage: 0 }
+  const counts = { status: 0, summary: 0, usage: 0, meUsage: 0, budget: 0 }
   const meUsageUrls: string[] = []
-  const fetchMock = vi.fn(async (input: unknown): Promise<{ ok: boolean, json: () => Promise<unknown> }> => {
+  const budgetRequests: Array<{ method: string, body: string }> = []
+  const fetchMock = vi.fn(async (input: unknown, init?: { method?: string, body?: string }): Promise<{ ok: boolean, json: () => Promise<unknown> }> => {
     const url = String(input)
     const pick = (route: Responder[] | undefined, count: number): Responder => {
       const responder = route?.[count] ?? route?.at(-1)
@@ -157,6 +188,10 @@ function stubFetch(script: { status?: Responder[], summary?: Responder[], usage?
     if (url.startsWith('/api/openmeter/me/summary')) {
       responder = pick(script.summary, counts.summary)
       counts.summary += 1
+    } else if (url.startsWith('/api/openmeter/me/budget')) {
+      responder = pick(script.budget, counts.budget)
+      budgetRequests.push({ method: init?.method ?? 'GET', body: init?.body ?? '' })
+      counts.budget += 1
     } else if (url.startsWith('/api/openmeter/me/usage')) {
       responder = pick(script.meUsage, counts.meUsage)
       meUsageUrls.push(url)
@@ -174,7 +209,7 @@ function stubFetch(script: { status?: Responder[], summary?: Responder[], usage?
     return { ok: responder.ok, json: async () => responder.payload }
   })
   vi.stubGlobal('fetch', fetchMock)
-  return { counts, meUsageUrls }
+  return { counts, meUsageUrls, budgetRequests }
 }
 
 function renderPanel(onOpenUsageDetail?: () => void): ReturnType<typeof render> {
@@ -193,6 +228,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('renders balance, runway, and the per-model cost table from the caller subject only', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000, hasAccess: true }))],
       usage: [ok(makeUsage([
         makeRow({ model: 'deepseek-chat', usage: { inputTokens: 300, outputTokens: 100, cacheReadTokens: 50 }, estimatedAmount: 1 }),
@@ -215,6 +251,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('counts non-CNY row tokens but excludes their amounts from the CNY totals', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([
         makeRow({ model: 'deepseek-chat', usage: { inputTokens: 300, outputTokens: 100 }, estimatedAmount: 1.5 }),
@@ -235,6 +272,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('routes the detail CTA to onOpenUsageDetail exactly once per click', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
     })
@@ -247,6 +285,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('shows the empty state when the seven-day usage is zero', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000, usageTokens7d: 0, estimatedCny7d: 0 }))],
       usage: [ok(makeUsage([]))],
     })
@@ -258,6 +297,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('shows the unavailable banner with local aggregates but no balance or runway', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availability: 'unavailable', usageTokens7d: 1200, estimatedCny7d: 3.5 }))],
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 3.5 })]))],
     })
@@ -274,6 +314,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('warns on low credit when the runway drops below seven days', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 690, usageTokens7d: 700 }))],
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 1 })]))],
     })
@@ -285,6 +326,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('surfaces a summary fetch error and refetches on retry', async () => {
     const { counts } = stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [{ rejects: new Error('network down') }, ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
     })
@@ -299,6 +341,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('degrades only the model table when the usage fetch rejects', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [{ rejects: new Error('usage down') }],
     })
@@ -314,6 +357,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('pins the narrow-screen layout: wrapping rows and full-width tables', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 2 })]))],
     })
@@ -329,6 +373,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('defaults to the overview tab and keeps the operator tabs', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 2 })]))],
     })
@@ -345,6 +390,7 @@ describe('BillingPanel overview (tenant surface)', () => {
   it('fetches the summary exactly once per mount (no effect loop)', async () => {
     const { counts } = stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 2 })]))],
     })
@@ -355,11 +401,13 @@ describe('BillingPanel overview (tenant surface)', () => {
     })
     expect(counts.summary).toBe(1)
     expect(counts.usage).toBe(1)
+    expect(counts.budget).toBe(1)
   })
 
   it('re-fetches the overview on the manual refresh path', async () => {
     const { counts } = stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 2 })]))],
     })
@@ -380,6 +428,7 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
   it('opens the detail view from the CTA and fetches the journal with a bare default query', async () => {
     const { counts, meUsageUrls } = stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
       meUsage: [ok(makeDetailPayload())],
@@ -396,6 +445,7 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
   it('returns to the overview on back and preserves filters and rows across revisits without refetching', async () => {
     const { counts } = stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
       meUsage: [ok(makeDetailPayload({ rows: [makeDetailRow({ model: 'deepseek-chat' })] }))],
@@ -419,6 +469,7 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
   it('commits date and model filters on apply with local-day epoch bounds; uncommitted edits never fetch', async () => {
     const { counts, meUsageUrls } = stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
       meUsage: [ok(makeDetailPayload()), ok(makeDetailPayload())],
@@ -446,6 +497,7 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
   it('groups rows into newest-first day sections with subtotals and per-row detail', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
       meUsage: [ok(makeDetailPayload({ rows: [
@@ -482,6 +534,7 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
   it('shows the empty state with the since-activation note on a successful empty load', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
       meUsage: [ok(makeDetailPayload({ rows: [] }))],
@@ -496,6 +549,7 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
   it('surfaces a localized error banner on rejection and recovers on retry with the same query', async () => {
     const { counts, meUsageUrls } = stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
       meUsage: [
@@ -517,6 +571,7 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
   it('appends the next keyset page and marks the end when the cursor stops', async () => {
     const { counts, meUsageUrls } = stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
       meUsage: [
@@ -541,6 +596,7 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
   it('hides the next-page button after a failed page fetch and resumes from the failed cursor on retry', async () => {
     const { counts, meUsageUrls } = stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
       meUsage: [
@@ -567,6 +623,7 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
   it('pins the narrow-screen detail layout: wrapping controls and full-width tables', async () => {
     stubFetch({
       status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
       summary: [ok(makeSummary({ availableTokens: 8000 }))],
       usage: [ok(makeUsage([]))],
       meUsage: [ok(makeDetailPayload())],
@@ -578,5 +635,217 @@ describe('BillingPanel usage detail view (tenant drill-down)', () => {
     const tables = Array.from(container.querySelectorAll('table'))
     expect(tables.length).toBeGreaterThan(0)
     for (const table of tables) expect(table.style.width).toBe('100%')
+  })
+})
+
+describe('BillingPanel budget card and editor (tenant surface)', () => {
+  it('renders a read-only card for a member: tone copy, no edit entry, no input on the page', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget({ canManageBudget: false }))],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    const { container } = renderPanel()
+    // The default payload projects ¥80.00 against the ¥100.00 budget: the near boundary (>= 0.8).
+    expect(await screen.findByText(t('budget.near', { projected: '¥80.00', budget: '¥100.00' }))).toBeTruthy()
+    expect(screen.queryByText(t('budget.edit'))).toBeNull()
+    expect(screen.queryByText(t('budget.configure'))).toBeNull()
+    expect(container.querySelectorAll('input')).toHaveLength(0)
+  })
+
+  it('edits the budget as manager: prefilled input, one PUT with the exact body, card refreshed from the response', async () => {
+    let resolvePut: (payload: BudgetPayload) => void = () => {}
+    const hangingPut = new Promise<BudgetPayload>(resolve => { resolvePut = resolve })
+    const { counts, budgetRequests } = stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget()), ok(hangingPut)],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    fireEvent.click(await screen.findByText(t('budget.edit')))
+    const input = screen.getByLabelText(t('budget.field')) as HTMLInputElement
+    expect(input.value).toBe('100.00')
+    fireEvent.change(input, { target: { value: '120.5' } })
+    fireEvent.click(screen.getByText(t('budget.save')))
+    // While the PUT is in flight the save button relabels and every button disables.
+    expect(await screen.findByText(t('budget.saving'))).toBeTruthy()
+    expect((screen.getByText(t('budget.saving')).closest('button') as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByText(t('budget.cancel')).closest('button') as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => {
+      resolvePut(makeBudget({ monthlyBudgetCny: 120.5 }))
+    })
+    await waitFor(() => {
+      expect(screen.queryByLabelText(t('budget.field'))).toBeNull()
+    })
+    expect(counts.budget).toBe(2)
+    // The serialized PUT body is pinned exactly: one field, the parsed amount.
+    expect(budgetRequests).toEqual([
+      { method: 'GET', body: '' },
+      { method: 'PUT', body: '{"monthlyBudgetCny":120.5}' },
+    ])
+    // The card re-renders from the PUT response (the fresh forecast), and the
+    // 120.5 budget against the ¥80.00 projection reads as under.
+    expect(screen.getByText(t('budget.progress', { budget: '¥120.50', spent: '¥50.00' }))).toBeTruthy()
+    expect(screen.getByText(t('budget.under', { projected: '¥80.00', budget: '¥120.50' }))).toBeTruthy()
+  })
+
+  it('rejects invalid amounts client-side with no fetch and the form staying open', async () => {
+    const { counts } = stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    fireEvent.click(await screen.findByText(t('budget.edit')))
+    for (const value of ['0', '-5', '0.004', '100000001', 'abc', '']) {
+      fireEvent.change(screen.getByLabelText(t('budget.field')), { target: { value } })
+      fireEvent.click(screen.getByText(t('budget.save')))
+      expect(await screen.findByText(t('budget.invalidAmount'))).toBeTruthy()
+      expect((screen.getByLabelText(t('budget.field')) as HTMLInputElement).value).toBe(value)
+    }
+    expect(counts.budget).toBe(1)
+  })
+
+  it('keeps the form open with the edited input on save failure, and a later good save still works', async () => {
+    const { counts } = stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget()), { ok: false, payload: { ok: false } }, ok(makeBudget({ monthlyBudgetCny: 140 }))],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    fireEvent.click(await screen.findByText(t('budget.edit')))
+    fireEvent.change(screen.getByLabelText(t('budget.field')), { target: { value: '130' } })
+    fireEvent.click(screen.getByText(t('budget.save')))
+    expect(await screen.findByText(t('budget.saveFailed'))).toBeTruthy()
+    expect((screen.getByLabelText(t('budget.field')) as HTMLInputElement).value).toBe('130')
+    fireEvent.change(screen.getByLabelText(t('budget.field')), { target: { value: '140' } })
+    fireEvent.click(screen.getByText(t('budget.save')))
+    await waitFor(() => {
+      expect(screen.queryByLabelText(t('budget.field'))).toBeNull()
+    })
+    expect(screen.queryByText(t('budget.saveFailed'))).toBeNull()
+    expect(screen.getByText(t('budget.progress', { budget: '¥140.00', spent: '¥50.00' }))).toBeTruthy()
+    expect(counts.budget).toBe(3)
+  })
+
+  it('cancel discards the edit and reopening prefills the original budget', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    fireEvent.click(await screen.findByText(t('budget.edit')))
+    fireEvent.change(screen.getByLabelText(t('budget.field')), { target: { value: '999' } })
+    fireEvent.click(screen.getByText(t('budget.cancel')))
+    expect(screen.queryByLabelText(t('budget.field'))).toBeNull()
+    expect(screen.getByText(t('budget.progress', { budget: '¥100.00', spent: '¥50.00' }))).toBeTruthy()
+    fireEvent.click(screen.getByText(t('budget.edit')))
+    expect((screen.getByLabelText(t('budget.field')) as HTMLInputElement).value).toBe('100.00')
+  })
+
+  it('warns over budget with the projected total, the budget, and the overage all in the copy', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget({ projectedMonthEndCny: 150, projectedOverageCny: 50 }))],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    expect(await screen.findByText(t('budget.over', { projected: '¥150.00', budget: '¥100.00', overage: '¥50.00' }))).toBeTruthy()
+  })
+
+  it('offers 设置预算 when unconfigured and renders the configured card from the save response', async () => {
+    const { budgetRequests } = stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget({ availability: 'unconfigured' })), ok(makeBudget({ monthlyBudgetCny: 80 }))],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    expect(await screen.findByText(t('budget.unconfigured'))).toBeTruthy()
+    expect(screen.getByText(t('budget.unconfiguredSpend', { spent: '¥50.00' }))).toBeTruthy()
+    expect(screen.getByText(t('budget.unconfiguredProjected', { projected: '¥80.00' }))).toBeTruthy()
+    expect(screen.queryByText(t('budget.edit'))).toBeNull()
+    fireEvent.click(screen.getByText(t('budget.configure')))
+    expect((screen.getByLabelText(t('budget.field')) as HTMLInputElement).value).toBe('')
+    fireEvent.change(screen.getByLabelText(t('budget.field')), { target: { value: '80' } })
+    fireEvent.click(screen.getByText(t('budget.save')))
+    await waitFor(() => {
+      expect(screen.queryByLabelText(t('budget.field'))).toBeNull()
+    })
+    expect(budgetRequests[1]).toEqual({ method: 'PUT', body: '{"monthlyBudgetCny":80}' })
+    expect(screen.getByText(t('budget.progress', { budget: '¥80.00', spent: '¥50.00' }))).toBeTruthy()
+  })
+
+  it('renders the distinct no-history copy without a projection or edit entry for a member', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget({ availability: 'insufficient-history', canManageBudget: false }))],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    const { container } = renderPanel()
+    expect(await screen.findByText(t('budget.noHistory'))).toBeTruthy()
+    expect(screen.queryByText(t('budget.unavailable'))).toBeNull()
+    expect(screen.queryByText(t('budget.edit'))).toBeNull()
+    expect(container.querySelectorAll('input')).toHaveLength(0)
+  })
+
+  it('degrades only the budget card when its fetch rejects: overview stays and no error banner', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      budget: [{ rejects: new Error('budget down') }],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([makeRow({ model: 'deepseek-chat', estimatedAmount: 2 })]))],
+    })
+    renderPanel()
+    expect(await screen.findByText(t('budget.unavailable'))).toBeTruthy()
+    expect(screen.queryByText(t('budget.edit'))).toBeNull()
+    expect(screen.getByText(new RegExp(`${num(8000)} Token`))).toBeTruthy()
+    expect(screen.getByText(t('overview.runway', { days: 40 }))).toBeTruthy()
+    expect(screen.getByText(t('overview.models'))).toBeTruthy()
+    expect(screen.queryByText(t('overview.error'))).toBeNull()
+  })
+
+  it('re-fetches the budget on manual refresh and renders the refreshed value', async () => {
+    const { counts } = stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget()), ok(makeBudget({ monthlyBudgetCny: 120.5 })), ok(makeBudget({ monthlyBudgetCny: 200 }))],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    fireEvent.click(await screen.findByText(t('budget.edit')))
+    fireEvent.change(screen.getByLabelText(t('budget.field')), { target: { value: '120.5' } })
+    fireEvent.click(screen.getByText(t('budget.save')))
+    await waitFor(() => {
+      expect(screen.queryByLabelText(t('budget.field'))).toBeNull()
+    })
+    expect(counts.budget).toBe(2)
+    fireEvent.click(screen.getByText(t('panel.refresh')))
+    await waitFor(() => {
+      expect(counts.budget).toBe(3)
+    })
+    expect(await screen.findByText(t('budget.progress', { budget: '¥200.00', spent: '¥50.00' }))).toBeTruthy()
+  })
+
+  it('pins the budget card rows to wrapping layout on narrow screens', async () => {
+    stubFetch({
+      status: [ok(makeStatus())],
+      budget: [ok(makeBudget())],
+      summary: [ok(makeSummary({ availableTokens: 8000 }))],
+      usage: [ok(makeUsage([]))],
+    })
+    renderPanel()
+    expect(await screen.findByText(t('budget.progress', { budget: '¥100.00', spent: '¥50.00' }))).toBeTruthy()
+    expect(screen.getByText(t('budget.title')).closest('div')?.style.flexWrap).toBe('wrap')
+    expect(screen.getByText(t('budget.progress', { budget: '¥100.00', spent: '¥50.00' })).closest('div')?.style.flexWrap).toBe('wrap')
+    expect(screen.getByText(t('budget.near', { projected: '¥80.00', budget: '¥100.00' })).closest('div')?.style.flexWrap).toBe('wrap')
   })
 })
