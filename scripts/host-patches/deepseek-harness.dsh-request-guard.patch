@@ -1,0 +1,525 @@
+diff --git a/packages/host/webserver/README.i18n.yaml b/packages/host/webserver/README.i18n.yaml
+index e5f84d4a7a..64cc5f93cb 100644
+--- a/packages/host/webserver/README.i18n.yaml
++++ b/packages/host/webserver/README.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write packages/host/webserver/README.md
+-README.md: 4211c640a0e7386e3380a4289e5ba619818bd094
+-README.zh.md: 6ad4f549cd234221cfef88ef0bfd9541fbe50043
++README.md: 90ace40dadc20bf0581f34666a6cba9d6aa242ca
++README.zh.md: 6347c5ac24cb86bdb0f15f29667529976c8c8ef4
+diff --git a/packages/host/webserver/README.md b/packages/host/webserver/README.md
+index 4211c640a0..90ace40dad 100644
+--- a/packages/host/webserver/README.md
++++ b/packages/host/webserver/README.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "The web GUI host's HTTP server: named-route and upgrade registration, index transforms, and the single fallback seat that serves the Web shell's SPA dist."
++description: "The web GUI host's HTTP server: named-route and upgrade registration, index transforms, the single guard seat, and the single fallback seat that serves the Web shell's SPA dist."
+ kind: "package-reference"
+ ---
+ 
+@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
+ 
+ ## Summary
+ 
+-Browsers reach the web GUI over HTTP through `dsh-host-webserver`: a `node:http` server where other plugins register named routes, upgrade routes, index startup inputs, and one fallback handler. It knows no harness concepts and serves no files — the `/api` bridge, plugin bundles, the HMR event stream, and the SPA dist belong to the plugins that register them. Route matching is fixed: exact over the whole table, then longest prefix, then the fallback handler. It serves browsers only; Electron loads dist over `file://` and carries fetch over an IPC bridge.
++Browsers reach the web GUI over HTTP through `dsh-host-webserver`: a `node:http` server where other plugins register named routes, upgrade routes, index startup inputs, one request guard, and one fallback handler. It knows no harness concepts and serves no files — the `/api` bridge, plugin bundles, the HMR event stream, and the SPA dist belong to the plugins that register them. Route matching is fixed: exact over the whole table, then longest prefix, then the fallback handler. It serves browsers only; Electron loads dist over `file://` and carries fetch over an IPC bridge.
+ 
+ ## Table of Contents
+ 
+@@ -50,6 +50,10 @@ Set `compression: 'gzip'` to wrap eligible socket-backed responses without chang
+ 
+ Index startup inputs are two layers. `collectIndexInjections()` gathers a fresh injection table — one `webserver/index-inject` emit per call, each subscriber pushing its current rows — and `renderIndex(html)` renders those rows into the index.html body before applying the raw `tapIndex(transform)` transforms in registration order. A `script-preload` row renders an advisory classic-script preload link. Static deployments carry the same rows in their boot payload. `applyIndexTaps(html)` applies only the raw transforms; it is the escape hatch for markup no row expresses.
+ 
++### The guard seat
++
++`registerGuard(guard)` claims the one admission callback consulted before any routing on every HTTP and upgrade request. A second registration throws; while no guard is registered every request is admitted with no observable change. An allow may attach a principal that handlers read through `principalOf(req)`; a veto answers with the guard's status and body fields on HTTP and destroys the upgrade socket without a 101. A guard that throws or rejects is logged and vetoed with the default fields (fail-closed).
++
+ ### Behavior under failure
+ 
+ A listen failure (for example EADDRINUSE) rejects plugin initialization with the bind diagnostic. An HTTP request whose handler throws is answered 400 — or the socket destroyed when headers are already out — and logged as a warning; it never exits the process. An upgrade-handler exception or upgraded-socket transport error logs a warning and destroys its socket.
+@@ -64,7 +68,7 @@ A listen failure (for example EADDRINUSE) rejects plugin initialization with the
+ 
+ ### Design concept
+ 
+-The package is a plain route registry with no harness vocabulary: `WebServer` extends Cordis `Service` and holds three route tables plus the fallback slot, the raw index-tap list, and the `webserver/index-inject` event the index renderer gathers rows through. Index rendering composes two layers per response: `renderIndex` renders the fresh injection table, including advisory `script-preload` rows, into the body, then applies the raw taps in registration order; `applyIndexTaps` runs the taps alone. The upgrade handler owns the protocol handshake and connection contents; the webserver only delivers the raw socket and request. `host` and `port` getters expose composition-time facts other plugins adapt to (for example the directory-picker chooser).
++The package is a plain route registry with no harness vocabulary: `WebServer` extends Cordis `Service` and holds three route tables plus the fallback and guard seats, the raw index-tap list, and the `webserver/index-inject` event the index renderer gathers rows through. Index rendering composes two layers per response: `renderIndex` renders the fresh injection table, including advisory `script-preload` rows, into the body, then applies the raw taps in registration order; `applyIndexTaps` runs the taps alone. The upgrade handler owns the protocol handshake and connection contents; the webserver only delivers the raw socket and request. `host` and `port` getters expose composition-time facts other plugins adapt to (for example the directory-picker chooser).
+ 
+ ### Matching and lifecycle
+ 
+@@ -74,7 +78,7 @@ The package is a plain route registry with no harness vocabulary: `WebServer` ex
+ 
+ | File | Role |
+ |---|---|
+-| [`src/index.ts`](src/index.ts) | `WebServer` service: route tables, fallback seat, index rendering, matching, lifecycle |
++| [`src/index.ts`](src/index.ts) | `WebServer` service: route tables, guard and fallback seats, index rendering, matching, lifecycle |
+ | [`src/injections.ts`](src/injections.ts) | Structured `IndexInjection` rows and `renderIndexInjections` row rendering |
+ 
+ </details>
+diff --git a/packages/host/webserver/README.zh.md b/packages/host/webserver/README.zh.md
+index 6ad4f549cd..6347c5ac24 100644
+--- a/packages/host/webserver/README.zh.md
++++ b/packages/host/webserver/README.zh.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "web GUI 宿主的 HTTP 服务器：具名路由与 upgrade 注册、index 转换，以及服务 Web 壳 SPA dist 的唯一回退席位。"
++description: "web GUI 宿主的 HTTP 服务器：具名路由与 upgrade 注册、index 转换、唯一守卫席位，以及服务 Web 壳 SPA dist 的唯一回退席位。"
+ kind: "package-reference"
+ ---
+ 
+@@ -9,7 +9,7 @@ kind: "package-reference"
+ 
+ ## 概述
+ 
+-浏览器经由 `dsh-host-webserver` 通过 HTTP 访问 web GUI：一个 `node:http` 服务器，其他插件在其中注册具名路由、upgrade 路由、index 启动输入与一个回退 handler。它不了解任何 harness 概念，也不提供任何文件服务——`/api` 桥接、插件 bundle、HMR（热模块替换）事件流与 SPA dist 都属于注册它们的插件。路由匹配顺序固定不变：先在整张表中匹配精确 route，再匹配最长前缀，最后交给回退 handler。它只服务浏览器；Electron 通过 `file://` 加载 dist，并经 IPC 桥接承载 fetch。
++浏览器经由 `dsh-host-webserver` 通过 HTTP 访问 web GUI：一个 `node:http` 服务器，其他插件在其中注册具名路由、upgrade 路由、index 启动输入、一个请求守卫与一个回退 handler。它不了解任何 harness 概念，也不提供任何文件服务——`/api` 桥接、插件 bundle、HMR（热模块替换）事件流与 SPA dist 都属于注册它们的插件。路由匹配顺序固定不变：先在整张表中匹配精确 route，再匹配最长前缀，最后交给回退 handler。它只服务浏览器；Electron 通过 `file://` 加载 dist，并经 IPC 桥接承载 fetch。
+ 
+ ## 目录
+ 
+@@ -50,6 +50,10 @@ kind: "package-reference"
+ 
+ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的注入表——每次调用发一次 `webserver/index-inject` 事件，每个订阅方推入其当前行——`renderIndex(html)` 先把这些行渲染进 index.html 正文，再按注册顺序应用原始 `tapIndex(transform)` 转换。`script-preload` 行会渲染为 classic script 的提示性 preload 链接。静态部署会在启动 payload 中携带同一批行。`applyIndexTaps(html)` 只应用原始转换；它是任何行都无法表达的标记的逃生口。
+ 
++### 守卫席位
++
++`registerGuard(guard)` 认领在所有 HTTP 与 upgrade 请求路由之前咨询的唯一个准入回调。第二次注册会抛错；未注册守卫时每个请求都原样放行，行为无可观察变化。allow 可以附加一个 principal，handler 通过 `principalOf(req)` 读取；veto 在 HTTP 上以守卫的 status 与 body 字段应答，在 upgrade 上不发 101 直接销毁 socket。守卫抛错或被 reject 时记录 warning 并按默认字段否决（fail-closed）。
++
+ ### 失败时的行为
+ 
+ 监听失败（例如 EADDRINUSE）会以绑定诊断信息拒绝插件初始化。handler 抛错的 HTTP 请求会得到 400——若响应头已经发出则销毁 socket——并记录 warning；它绝不会退出进程。upgrade handler 抛错或升级 socket 出现传输错误时，会记录 warning 并销毁对应 socket。
+@@ -64,7 +68,7 @@ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的
+ 
+ ### 设计理念
+ 
+-本包是一个不带任何 harness 词汇的普通路由注册表：`WebServer` 继承 Cordis `Service`，持有三张路由表、回退槽位、原始 index 转换列表，以及 index 渲染器经其收集行的 `webserver/index-inject` 事件。index 渲染每次响应组合两层：`renderIndex` 先把包含提示性 `script-preload` 行的全新注入表渲染进正文，再按注册顺序应用原始转换；`applyIndexTaps` 只运行转换。upgrade handler 拥有协议握手与连接内容；webserver 只交付原始 socket 与 request。`host` 与 `port` getter 暴露其他插件据以自适应的组合期事实（例如 directory-picker 选择器）。
++本包是一个不带任何 harness 词汇的普通路由注册表：`WebServer` 继承 Cordis `Service`，持有三张路由表、回退与守卫席位、原始 index 转换列表，以及 index 渲染器经其收集行的 `webserver/index-inject` 事件。index 渲染每次响应组合两层：`renderIndex` 先把包含提示性 `script-preload` 行的全新注入表渲染进正文，再按注册顺序应用原始转换；`applyIndexTaps` 只运行转换。upgrade handler 拥有协议握手与连接内容；webserver 只交付原始 socket 与 request。`host` 与 `port` getter 暴露其他插件据以自适应的组合期事实（例如 directory-picker 选择器）。
+ 
+ ### 匹配与生命周期
+ 
+@@ -74,7 +78,7 @@ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的
+ 
+ | 文件 | 职责 |
+ |---|---|
+-| [`src/index.ts`](src/index.ts) | `WebServer` 服务：路由表、回退席位、index 渲染、匹配、生命周期 |
++| [`src/index.ts`](src/index.ts) | `WebServer` 服务：路由表、守卫与回退席位、index 渲染、匹配、生命周期 |
+ | [`src/injections.ts`](src/injections.ts) | 结构化 `IndexInjection` 行与 `renderIndexInjections` 行渲染 |
+ 
+ </details>
+diff --git a/packages/host/webserver/src/index.ts b/packages/host/webserver/src/index.ts
+index bc41100de9..71020c4035 100644
+--- a/packages/host/webserver/src/index.ts
++++ b/packages/host/webserver/src/index.ts
+@@ -1,9 +1,9 @@
+ /**
+  * @deepseek-ai/dsh-host-webserver — node:http route registration with optional
+- * gzip, index injection, and one fallback seat. It knows no harness concepts
+- * and serves no files; the composing application owns dist serving. Electron
+- * uses file:// plus IPC instead, and this package never prints the URL.
+- * Route handlers retain direct response ownership.
++ * gzip, index injection, one fallback seat, and one guard seat. It knows no
++ * harness concepts and serves no files; the composing application owns dist
++ * serving. Electron uses file:// plus IPC instead, and this package never
++ * prints the URL. Route handlers retain direct response ownership.
+  */
+ 
+ import { createServer } from 'node:http'
+@@ -55,6 +55,28 @@ export interface WebUpgradeRoute {
+   handler: (req: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>
+ }
+ 
++/**
++ * Admission verdict for one request: allow, optionally attaching a principal
++ * readable through {@link WebServer.principalOf}, or veto with the HTTP
++ * response fields (an upgrade veto destroys the socket instead). Veto fields
++ * are trusted as typed: an invalid status (below 100) or a non-string body
++ * still vetoes — the request falls through to the existing 400 catch-all or
++ * a destroyed connection.
++ */
++export type RequestGuardDecision =
++  | { allow: true; principal?: unknown }
++  | { allow: false; status?: number; body?: string }
++
++/**
++ * Single-seat admission callback consulted before any routing on both HTTP
++ * and upgrade requests. Throwing or rejecting counts as a veto with the
++ * default response fields (fail-closed).
++ */
++export type RequestGuard = (
++  req: IncomingMessage,
++  kind: 'http' | 'upgrade',
++) => RequestGuardDecision | Promise<RequestGuardDecision>
++
+ /** Web server listen and response-compression config. */
+ export interface Config {
+   /** Listen host; the two supported values are loopback and all-interfaces. */
+@@ -136,6 +158,8 @@ export class WebServer extends Service {
+   private readonly upgradedSockets = new Set<Duplex>()
+   private readonly indexTaps: ((html: string) => string)[] = []
+   private fallback: WebRoute['handler'] | undefined
++  private guard: RequestGuard | undefined
++  private readonly principals = new WeakMap<IncomingMessage, unknown>()
+   private server!: Server
+   private listenedPort!: number
+   private readonly gzip: NodeMiddleware | undefined
+@@ -201,6 +225,32 @@ export class WebServer extends Service {
+     return () => { this.fallback = undefined }
+   }
+ 
++  /**
++   * Claim the guard seat: the callback admits or vetoes every HTTP and
++   * upgrade request before routing, optionally attaching a principal per
++   * request. One owner only — a second registration throws, because two
++   * guards cannot compose.
++   * @param guard - admission callback; a throw or rejection vetoes fail-closed.
++   * @returns the disposer releasing the seat.
++   */
++  registerGuard(guard: RequestGuard): () => void {
++    if (this.guard !== undefined) {
++      throw new Error('webserver: guard already registered')
++    }
++    this.guard = guard
++    return () => { this.guard = undefined }
++  }
++
++  /**
++   * The principal the guard attached to this request: undefined when no guard
++   * ran, the guard allowed without a principal, or the guard vetoed.
++   * @param req - one request admitted to a handler.
++   * @returns the guard-supplied principal, or undefined.
++   */
++  principalOf(req: IncomingMessage): unknown {
++    return this.principals.get(req)
++  }
++
+   /**
+    * Register a raw-HTML index transform, the escape hatch for markup no
+    * {@link IndexInjection} row expresses: {@link renderIndex} applies taps in
+@@ -219,6 +269,13 @@ export class WebServer extends Service {
+   /** Listen; resolves once the socket is bound (rejection = FAILED fiber). */
+   async [Service.init](): Promise<void> {
+     const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
++      const decision = await this.decide(req, 'http')
++      if (!decision.allow) {
++        res.writeHead(decision.status ?? 401, { 'content-type': 'text/plain; charset=utf-8' })
++        res.end(decision.body ?? 'Unauthorized')
++        return
++      }
++      if (decision.principal !== undefined) this.principals.set(req, decision.principal)
+       /* v8 ignore next -- `?? '/'` arm: node:http always sets url on server
+       requests; the field is only optional on the client-side IncomingMessage type */
+       const rawPath = new URL(req.url ?? '/', 'http://x').pathname
+@@ -264,29 +321,7 @@ export class WebServer extends Service {
+         socket.off('error', onError)
+         this.upgradedSockets.delete(socket)
+       })
+-      let route: WebUpgradeRoute | undefined
+-      try {
+-        /* v8 ignore next -- node:http always sets url on server requests. */
+-        route = this.upgrades.get(new URL(req.url ?? '/', 'http://x').pathname)
+-      } catch (error) {
+-        this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
+-        socket.destroy()
+-        return
+-      }
+-      if (route === undefined) {
+-        socket.destroy()
+-        return
+-      }
+-      this.upgradedSockets.add(socket)
+-      try {
+-        Promise.resolve(route.handler(req, socket, head)).catch((error: unknown) => {
+-          this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
+-          socket.destroy()
+-        })
+-      } catch (error) {
+-        this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
+-        socket.destroy()
+-      }
++      void this.admitUpgrade(req, socket, head)
+     })
+ 
+     await new Promise<void>((resolve, reject) => {
+@@ -314,6 +349,68 @@ export class WebServer extends Service {
+     }, 'webServer.listen')
+   }
+ 
++  /**
++   * Consult the guard seat fail-closed: an empty seat allows, and a guard
++   * that throws or rejects is logged and vetoed with the default response
++   * fields — a guard failure never admits.
++   * @param req - the incoming request.
++   * @param kind - carrier the request arrived on.
++   * @returns the guard decision, or the default allow when the seat is empty.
++   */
++  private async decide(req: IncomingMessage, kind: 'http' | 'upgrade'): Promise<RequestGuardDecision> {
++    const guard = this.guard
++    if (guard === undefined) return { allow: true }
++    try {
++      return await guard(req, kind)
++    } catch (error) {
++      this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
++      return { allow: false }
++    }
++  }
++
++  /**
++   * Guard then dispatch one upgrade request: a veto destroys the socket
++   * without a 101; an allow records the principal and dispatches through the
++   * exact-path route table, where unknown paths are destroyed. A socket
++   * destroyed while the decision was pending never enters the upgraded set:
++   * its close event already fired, and waiting on it would hang teardown.
++   * @param req - the upgrade request.
++   * @param socket - the raw duplex to negotiate on.
++   * @param head - bytes already received after the request headers.
++   */
++  private async admitUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
++    const decision = await this.decide(req, 'upgrade')
++    if (socket.destroyed) return
++    if (!decision.allow) {
++      socket.destroy()
++      return
++    }
++    if (decision.principal !== undefined) this.principals.set(req, decision.principal)
++    let route: WebUpgradeRoute | undefined
++    try {
++      /* v8 ignore next -- node:http always sets url on server requests. */
++      route = this.upgrades.get(new URL(req.url ?? '/', 'http://x').pathname)
++    } catch (error) {
++      this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
++      socket.destroy()
++      return
++    }
++    if (route === undefined) {
++      socket.destroy()
++      return
++    }
++    this.upgradedSockets.add(socket)
++    try {
++      Promise.resolve(route.handler(req, socket, head)).catch((error: unknown) => {
++        this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
++        socket.destroy()
++      })
++    } catch (error) {
++      this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
++      socket.destroy()
++    }
++  }
++
+   /** Longest-prefix-wins over the prefix table after an exact-table miss. */
+   private match(pathname: string): WebRoute | undefined {
+     const exact = this.exact.get(pathname)
+diff --git a/packages/host/webserver/tests/webserver.spec.ts b/packages/host/webserver/tests/webserver.spec.ts
+index b7ac506b17..996cc17347 100644
+--- a/packages/host/webserver/tests/webserver.spec.ts
++++ b/packages/host/webserver/tests/webserver.spec.ts
+@@ -9,13 +9,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+ import { once } from 'node:events'
+ import { connect } from 'node:net'
+ import { tmpdir } from 'node:os'
++import type { Duplex } from 'node:stream'
+ import { join } from 'node:path'
+ import { pathToFileURL } from 'node:url'
+ import { afterEach, describe, expect, it } from 'vitest'
+ import { Context } from '@deepseek-ai/cordis'
+ import Loader from '@deepseek-ai/cordis-plugin-loader'
+ import Include from '@deepseek-ai/cordis-plugin-include'
+-import HttpServer, { renderIndexInjections } from '../src/index.ts'
++import HttpServer, { renderIndexInjections, type RequestGuardDecision } from '../src/index.ts'
+ 
+ let root: string | undefined
+ let context: Context | undefined
+@@ -303,6 +304,191 @@ describe('real Loader composition', () => {
+     await expect(request(port, '/probe')).rejects.toThrow()
+   })
+ 
++  it('guards http and upgrade requests through the single guard seat before routing', { timeout: 60_000 }, async () => {
++    const loaded = await loadComposition()
++    const server = loaded.webServer
++    const port = server.port
++
++    /** Open one raw upgrade request; resolve with every byte received before the server tears the connection down. */
++    const tornUpgrade = async (path: string): Promise<string> => {
++      const socket = connect(port, '127.0.0.1')
++      // A server-side reset is the fixture outcome, not a failure.
++      socket.on('error', () => {})
++      await once(socket, 'connect')
++      let bytes = ''
++      socket.on('data', (chunk) => { bytes += String(chunk) })
++      const closed = once(socket, 'close')
++      socket.write([
++        `GET ${path} HTTP/1.1`,
++        `Host: 127.0.0.1:${String(port)}`,
++        'Connection: Upgrade',
++        'Upgrade: dsh-test',
++        '',
++        '',
++      ].join('\r\n'))
++      await closed
++      return bytes
++    }
++
++    server.register({
++      kind: 'exact',
++      path: '/api/echo-principal',
++      handler: (req, res) => {
++        res.writeHead(200, { 'content-type': 'application/json' })
++        res.end(JSON.stringify({ principal: server.principalOf(req) }))
++      },
++    })
++    let upgradePrincipal: unknown = 'never-admitted'
++    server.registerUpgrade({
++      path: '/upgrade-principal',
++      handler: (req, socket) => {
++        upgradePrincipal = server.principalOf(req)
++        socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: dsh-test\r\n\r\n')
++      },
++    })
++
++    // With no guard registered the composition answers as before: unmatched
++    // paths still get the unclaimed 404.
++    expect((await request(port, '/no/such/route')).status).toBe(404)
++
++    // Allow with principal: both carriers read the guard's principal through
++    // principalOf, and kind names the carrier the request arrived on. The
++    // seat admits exactly one owner and the disposer releases it.
++    const kinds: string[] = []
++    const releaseAllow = server.registerGuard((_req, kind) => {
++      kinds.push(kind)
++      return { allow: true, principal: { subject: 'guard-alice' } }
++    })
++    expect(() => server.registerGuard(() => ({ allow: true }))).toThrow(/guard already registered/)
++    expect((await request(port, '/api/echo-principal')).body).toContain('"subject":"guard-alice"')
++    const admitted = await upgrade(port, '/upgrade-principal')
++    admitted.destroy()
++    expect(upgradePrincipal).toEqual({ subject: 'guard-alice' })
++    expect(kinds).toEqual(['http', 'upgrade'])
++
++    // Allow without principal: principalOf reads undefined.
++    releaseAllow()
++    const releaseBareAllow = server.registerGuard(() => ({ allow: true }))
++    expect((await request(port, '/api/echo-principal')).body).toBe('{}')
++    releaseBareAllow()
++
++    // Veto defaults: 401 'Unauthorized' with a plain-text content type,
++    // decided before routing — an unregistered path is vetoed (401), not
++    // unmatched (404), and a registered upgrade route dies on the socket
++    // without a 101.
++    const releaseVeto = server.registerGuard(() => ({ allow: false }))
++    const vetoed = await request(port, '/api/echo-principal')
++    expect(vetoed).toMatchObject({ status: 401, body: 'Unauthorized' })
++    expect(vetoed.headers.get('content-type')).toBe('text/plain; charset=utf-8')
++    expect((await request(port, '/no/such/route')).status).toBe(401)
++    expect(await tornUpgrade('/upgrade-principal')).not.toContain('101')
++    releaseVeto()
++
++    // Custom veto fields: status and body each override independently of
++    // the other.
++    const releaseCustomVeto = server.registerGuard((req, kind) => {
++      if (kind === 'upgrade') return { allow: false }
++      const pathname = new URL(req.url ?? '/', 'http://x').pathname
++      if (pathname === '/custom-status') return { allow: false, status: 403 }
++      if (pathname === '/custom-both') return { allow: false, status: 403, body: 'forbidden by guard' }
++      return { allow: false, body: 'forbidden by guard' }
++    })
++    expect(await request(port, '/api/echo-principal')).toMatchObject({ status: 401, body: 'forbidden by guard' })
++    expect(await request(port, '/custom-status')).toMatchObject({ status: 403, body: 'Unauthorized' })
++    expect(await request(port, '/custom-both')).toMatchObject({ status: 403, body: 'forbidden by guard' })
++    releaseCustomVeto()
++
++    // Fail-closed: a throwing or rejecting guard vetoes with the defaults —
++    // HTTP answers 401 and the upgrade socket is destroyed.
++    const releaseFailing = server.registerGuard((_req, kind) => {
++      if (kind === 'http') throw new Error('guard explosion')
++      return Promise.reject(new Error('guard rejection'))
++    })
++    expect(await request(port, '/api/echo-principal')).toMatchObject({ status: 401, body: 'Unauthorized' })
++    expect(await tornUpgrade('/upgrade-principal')).not.toContain('101')
++    releaseFailing()
++
++    // With the seat released, registrability is restored and handlers read
++    // no principal again.
++    expect(() => server.registerGuard(() => ({ allow: true }))).not.toThrow()
++    expect((await request(port, '/api/echo-principal')).body).toBe('{}')
++  })
++
++  it('drops an upgrade socket destroyed while the guard decision is pending', { timeout: 60_000 }, async () => {
++    const loaded = await loadComposition()
++    const server = loaded.webServer
++    const port = server.port
++
++    server.register({
++      kind: 'exact',
++      path: '/probe',
++      handler: (_req, res) => { res.writeHead(200); res.end('OK') },
++    })
++    server.registerUpgrade({
++      path: '/upgrade-race',
++      handler: () => { /* reaching dispatch at all is the observable; nothing is written either way */ },
++    })
++    let releaseDecision: ((decision: RequestGuardDecision) => void) | undefined
++    let serverSocket: Duplex | undefined
++    let sawUpgrade!: () => void
++    const guardEntered = new Promise<void>((resolve) => { sawUpgrade = resolve })
++    server.registerGuard((req, kind) => {
++      if (kind !== 'upgrade') return { allow: true }
++      serverSocket = req.socket
++      sawUpgrade()
++      return new Promise<RequestGuardDecision>((resolve) => { releaseDecision = resolve })
++    })
++
++    // Reset the connection from inside the guard's decision window: after the
++    // guard has been entered, and after the server side has finished tearing
++    // the socket down.
++    const client = connect(port, '127.0.0.1')
++    client.on('error', () => { /* the fixture reset is the outcome, not a failure */ })
++    await once(client, 'connect')
++    client.write([
++      'GET /upgrade-race HTTP/1.1',
++      `Host: 127.0.0.1:${String(port)}`,
++      'Connection: Upgrade',
++      'Upgrade: dsh-test',
++      '',
++      '',
++    ].join('\r\n'))
++    await guardEntered
++    client.resetAndDestroy()
++    // events.once() rejects on a prior 'error' emission; the raw once waits
++    // out the reset's ECONNRESET for the close alone.
++    await new Promise<void>((resolve) => { serverSocket!.once('close', resolve) })
++    releaseDecision!({ allow: true })
++
++    // The composition keeps serving ordinary HTTP after the raced admission.
++    expect(await request(port, '/probe')).toMatchObject({ status: 200, body: 'OK' })
++
++    // Teardown must settle without waiting on a socket whose close event
++    // already fired; the manual emit unblocks an unfixed build so this
++    // assertion fails the test instead of hanging the suite.
++    await new Promise<void>((resolve, reject) => {
++      const timer = setTimeout(() => {
++        serverSocket?.emit('close')
++        reject(new Error('webserver dispose hung on the upgrade socket raced inside the guard window'))
++      }, 2_000)
++      void loaded.fiber.dispose().then(
++        () => { clearTimeout(timer); resolve() },
++        reject,
++      )
++    })
++  })
++
++  it('still applies a guard veto when gzip compression is configured', { timeout: 60_000 }, async () => {
++    const loaded = await loadComposition(0, true)
++    const server = loaded.webServer
++    const releaseGuard = server.registerGuard(() => ({ allow: false, body: 'guard-veto' }))
++    // The veto answers before routing on an unmatched path; the sub-threshold
++    // body stays identity, so the guard's fields assert verbatim.
++    const vetoed = await request(server.port, '/no/such/route')
++    expect(vetoed).toMatchObject({ status: 401, body: 'guard-veto' })
++    releaseGuard()
++  })
++
+   it('collects injection rows fresh per render and layers taps over the rendered rows', { timeout: 60_000 }, async () => {
+     const loaded = await loadComposition()
+     const server = loaded.webServer
