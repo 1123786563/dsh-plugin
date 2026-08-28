@@ -34,6 +34,8 @@ DSH_HOST_REPO=/path/to/deepseek-harness ./apply.sh --check
 - 幂等语义：先做 `git apply --check --reverse` 探测——补丁已存在则输出 `already applied, skipping` 退出 0；不存在则正向预演，失败（基线不符/冲突）退出 1 并提示基线 commit。
 - 实际应用后再次 reverse 探测确认，输出应用文件数（取自 patch 头）；**不自动 commit**。
 
+钩子语义与消费方（dsh-casdoor-auth）见 [ADR-0006](../../plugins/dsh-casdoor-auth/docs/adr/0006-zero-trust-private-port-guard.md)。
+
 ## 回退
 
 应用产生的未提交改动，在宿主仓二选一回退：

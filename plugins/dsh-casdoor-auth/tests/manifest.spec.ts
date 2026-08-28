@@ -42,4 +42,16 @@ describe('cordis.patch.yml', () => {
     expect(patch).toContain('DSH_CASDOOR_GATEWAY_JWKS_URL')
     expect(patch).toContain("identityPublicKey: !!js process.env.DSH_CASDOOR_IDENTITY_PUBLIC_KEY ?? ''")
   })
+
+  it('injects the guard switch: DSH_CASDOOR_GUARD on only for 1/true, else off', () => {
+    expect(patch).toContain(
+      "guardEnabled: !!js process.env.DSH_CASDOOR_GUARD === '1' || process.env.DSH_CASDOOR_GUARD === 'true'",
+    )
+  })
+
+  it('injects the gateway data dir with the unchanged verbatim default', () => {
+    expect(patch).toContain(
+      "gatewayDataDir: !!js process.env.DSH_CASDOOR_GATEWAY_DATA_DIR ?? '~/.dsh-casdoor-gateway'",
+    )
+  })
 })
