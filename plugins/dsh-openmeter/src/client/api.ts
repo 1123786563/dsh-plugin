@@ -139,6 +139,27 @@ export interface UsageDetailQuery {
 }
 
 /**
+ * The caller's own tenant budget forecast (GET /api/openmeter/me/budget,
+ * and the PUT response after a set). Field presence mirrors the server
+ * union: `unconfigured` carries spend (and a projection when the month has
+ * calls) but no budget; `insufficient-history` adds the budget with no
+ * projection; `ready` carries all fields.
+ */
+export interface BudgetPayload {
+  ok: boolean
+  availability: 'ready' | 'unconfigured' | 'insufficient-history'
+  basis: { method: string, monthStartMs: number, monthEndMs: number, daysInMonth: number, daysElapsed: number, dataAsOfMs: number, currency: string, spendSource: string }
+  /** Configured monthly budget in CNY; absent when unconfigured. */
+  monthlyBudgetCny?: number
+  /** CNY spend month-to-date; present on every availability. */
+  monthToDateCny?: number
+  /** Linear-daily-average projection to month end; absent without metered calls. */
+  projectedMonthEndCny?: number
+  /** Math.max(0, projection − budget); present only on `ready`. */
+  projectedOverageCny?: number
+}
+
+/**
  * Fetch one JSON route.
  * @param path - the route path (relative).
  * @param init - optional fetch init.
@@ -183,4 +204,9 @@ export const api = {
     const queryString = params.size > 0 ? `?${params.toString()}` : ''
     return call<UsageDetailPayload>(`/api/openmeter/me/usage${queryString}`)
   },
+  /** GET the caller's own tenant budget forecast. */
+  budget: (): Promise<BudgetPayload> => call<BudgetPayload>('/api/openmeter/me/budget'),
+  /** PUT the caller's monthly budget (CNY); answers the fresh forecast. */
+  setBudget: (monthlyBudgetCny: number): Promise<BudgetPayload> =>
+    call<BudgetPayload>('/api/openmeter/me/budget', { method: 'PUT', body: JSON.stringify({ monthlyBudgetCny }) }),
 }

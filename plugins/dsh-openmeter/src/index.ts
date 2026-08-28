@@ -18,6 +18,7 @@ import type {} from '@deepseek-ai/dsh-session'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { IncomingMessage } from 'node:http'
 import { join } from 'node:path'
+import { BudgetStore } from './budget.ts'
 import { Config, resolveConfig } from './config.ts'
 import type { Config as ConfigShape } from './config.ts'
 import { resolveDshHome } from './dsh-home.ts'
@@ -79,6 +80,7 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
 
   const wal = new MeteringWal(dir)
   const usageLedger = UsageLedger.open(dir)
+  const budgetStore = BudgetStore.open(dir)
   const store = new OperatorStore(dir)
   const client = new OpenMeterClient(getConfig)
   const estimator = new PriceEstimator(() => client, () => current.quoteCurrency)
@@ -151,6 +153,7 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
       disposeStream()
       disposeEvents()
       usageLedger.close()
+      budgetStore.close()
     }
   }, 'openmeter: pipeline')
 
@@ -182,6 +185,7 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
         estimator,
         wal,
         usageLedger,
+        budget: budgetStore,
         auth,
       })
     }, 'openmeter: routes')
