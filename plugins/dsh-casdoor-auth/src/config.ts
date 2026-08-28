@@ -51,6 +51,12 @@ export interface Config {
   credentials: Readonly<Record<string, string>>
   /** Data directory of the companion dsh-casdoor-gateway service (launch-token handoff). */
   gatewayDataDir: string
+  /**
+   * Zero-trust private-port guard switch (escape hatch): false keeps the
+   * pre-gate behavior byte-identical; true claims the host webserver's
+   * guard seat and vetoes every request without a valid credential.
+   */
+  guardEnabled: boolean
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -65,6 +71,7 @@ export const DEFAULT_CONFIG: Config = {
   mcpServersByTenant: {},
   credentials: {},
   gatewayDataDir: '~/.dsh-casdoor-gateway',
+  guardEnabled: false,
 }
 
 // Schemastery's inferred object-schema types do not line up with interfaces
@@ -119,6 +126,9 @@ export const Config: Schema<Config> = Schema.object({
   ),
   gatewayDataDir: Schema.string().default(DEFAULT_CONFIG.gatewayDataDir).description(
     'Data directory of the dsh-casdoor-gateway service; the plugin publishes the webserver launch token there for the gateway to exchange.',
+  ),
+  guardEnabled: Schema.boolean().default(DEFAULT_CONFIG.guardEnabled).description(
+    'Zero-trust private-port guard: veto every webserver request (HTTP and WebSocket upgrade) that carries no valid DshIdentityToken or launch token; false keeps the pre-gate behavior. Requires a host core patched with scripts/host-patches/deepseek-harness.dsh-request-guard.patch.',
   ),
 }) as unknown as Schema<Config>
 

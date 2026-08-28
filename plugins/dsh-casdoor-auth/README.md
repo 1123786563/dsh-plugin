@@ -15,6 +15,7 @@
 ## 职责
 
 - **`ctx.casdoorAuth`**：验证网关转发的 DshIdentityToken（JWKS 验签、iss/aud/算法校验），物化 `{tenantId, userId, displayName, roles}`；
+- **zero-trust 私口守卫**（`guardEnabled`，默认关）：认领宿主 webserver 唯一守卫席位（`registerGuard`），私口上一切 HTTP/WS 升级请求必须携带有效凭证（DshIdentityToken 或 launch-token 自举凭证），否则一律 401 固定文案——无路径白名单，裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)；
 - **401 登出监视器**：通过 `webServer.tapIndex` 注入极小脚本进 SPA shell——登录会话中途过期时，首个同源 401 自动跳 `/login`（无 client 半区依赖，覆盖一切插件的 fetch）；
 - **dsh-multi-tenant 装配**：以已验证身份为其 `identity` 接缝供 TenantPrincipal，挂载 `/_dsh-multi-tenant` Web 桥（identity / agents/create / agents/resume），MCP 服务器与 Principal 凭据从插件配置读取（v1：静态，见配置）。
 
@@ -57,7 +58,7 @@ pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
 ## 已知边界
 
 - **stock Web UI 无租户隔离**（上游 [issue #41](https://github.com/GuoMonth/dsh-multi-tenant/issues/41)）：登录后是共享工作区；租户隔离发生在 Agent 层（会话归属 claim-once + Principal 绑定）。
-- 本机进程可直连 `38080` 绕过网关（loopback 内信任边界）。
+- 本机进程直连 `38080` 绕过网关的旁路已由 zero-trust 私口守卫关闭（开启 `guardEnabled` 后，无有效凭证的直连一律 401；逃生门与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)）。
 - 特权方法（settings/credentials/agentPreset 等 15 个）在网关层要求 casdoor 角色 `dsh-admin`。
 
 ## 文档
