@@ -52,6 +52,12 @@ export class MultiTenantService extends Service {
     return this.store.get(sessionId)
   }
 
+  /** Trusted-facing list of the principal's session ids, ascending by session id. */
+  async listSessionsByOwner(principal: TenantPrincipal): Promise<string[]> {
+    validateTenantPrincipal(principal)
+    return this.store.listByOwner(principal.tenantId, principal.userId)
+  }
+
   /** Fail-closed boolean authorization. Unknown session → `false`. */
   async canAccessSession(principal: TenantPrincipal, sessionId: string): Promise<boolean> {
     return (await this.evaluateAccess(principal, sessionId)).allowed
