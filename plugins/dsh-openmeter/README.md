@@ -18,6 +18,45 @@ OpenMeter 计费插件 for DeepSeek Harness：把每次 LLM 模型调用的 toke
 
 设置里的一级页面「计费」（不占用插件管理区）：**用量**（本月按客户聚合 + 最近逐调用明细与估算金额）／**收银台**（客户列表+余额、充值=grant、手动阻断/解封、预设↔客户映射）／**设置**（endpoint / token / featureKey / meterSlug / 币种 / 阻断开关等，保存即热生效）。
 
+## 运营者 API 迁移
+
+原全局收银台路由已迁移到运营者前缀 `/api/openmeter/operator/*`,由运营者角色守卫:接线 auth seam 时必须解析出 `isOperator` 策略,stock 部署保持原回环守卫行为。`/status` 与 `/usage` 原地不动;方法、body 契约、成功 payload 形状与迁移前一致。
+
+| 旧路径(已移除) | 新路径 |
+| --- | --- |
+| `GET/POST /api/openmeter/customers` | `GET/POST /api/openmeter/operator/customers` |
+| `POST /api/openmeter/grants` | `POST /api/openmeter/operator/grants` |
+| `POST /api/openmeter/block` | `POST /api/openmeter/operator/block` |
+| `GET/POST /api/openmeter/bindings` | `GET/POST /api/openmeter/operator/bindings` |
+
+### 410 语义
+
+旧路径保持注册,但对**一切方法、一切调用者**(stock 回环、运营者、租户成员、匿名、非回环来源)一律稳定回答 410,不保留兼容别名。该响应不经过回环守卫、不查 auth seam、不读 store、不调 OpenMeter——与调用者身份或目标是否存在完全无关,零信息泄露:
+
+```json
+{ "ok": false, "error": "route-migrated", "to": "/api/openmeter/operator/customers" }
+```
+
+### audit 字段
+
+四个变更类成功响应(create 201 / grant 201 / block 200 / binding-set 200)统一附带 `audit` 记录:
+
+```json
+{
+  "action": "grant.create",
+  "target": "cust-acme",
+  "at": 1761580800000,
+  "actor": { "tenantId": "dsh-ops", "userId": "root" }
+}
+```
+
+- `action`:`customer.create` / `grant.create` / `block.set` / `binding.set`。
+- `target`:customer key 字符串;`binding.set` 为 `{presetId, customerKey}`(空 customerKey 表示解绑)。
+- `at`:epoch 毫秒。
+- `actor`:仅当 auth seam 在线且解析出策略时存在;stock 回环模式(无 seam)省略该字段,绝不伪造身份。
+
+GET 读响应不变(无 audit,列表 payload 字节兼容)。重复操作语义:block 同值两次均 200(幂等 set,第二次 `audit.at` 不早于第一次)、binding 同对两次均 200、grant 两次均 201(充值有意非幂等)。
+
 ## 部署
 
 ### 1. 启动 OpenMeter fork（自托管）
