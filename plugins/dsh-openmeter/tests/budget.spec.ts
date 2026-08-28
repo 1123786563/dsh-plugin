@@ -344,6 +344,27 @@ describe('loadBudgetForecast', () => {
     }
   })
 
+  it('unconfigured with an empty month: no projection fabricated for zero spend', async () => {
+    const store = await openBudget()
+    try {
+      const spend = fakeMonthSpend({ estimatedAmountCny: 0, calls: 0, unpricedCalls: 0 })
+      const result = loadBudgetForecast(
+        { tenantId: 'acme', subject: 'subj-acme' },
+        { budgetStore: store, monthSpend: spend.monthSpend, now: () => NOW_AUG_15 },
+      )
+      const unconfigured = asUnconfigured(result)
+      expect(unconfigured.monthToDateCny).toBe(0)
+      // 计算失败不伪造 0: absent, never a fabricated 0 projection.
+      expect('projectedMonthEndCny' in unconfigured).toBe(false)
+      expect('monthlyBudgetCny' in unconfigured).toBe(false)
+      expect('projectedOverageCny' in unconfigured).toBe(false)
+      expect(unconfigured.basis.method).toBe('none')
+      expect(spend.calls).toEqual([{ subject: 'subj-acme', from: AUG_START, to: AUG_END }])
+    } finally {
+      store.close()
+    }
+  })
+
   it('queries monthSpend with the exact inclusive UTC month bounds of now', async () => {
     const store = await openBudget()
     try {

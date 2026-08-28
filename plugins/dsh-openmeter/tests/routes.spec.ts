@@ -1101,6 +1101,7 @@ describe('mountRoutes /me/budget tenant route', () => {
       const before = await dispatch(server.handlers, 'GET', BUDGET_PATH)
       expect(before.status).toBe(200)
       expect(JSON.parse(before.body).availability).toBe('unconfigured')
+      expect(Object.hasOwn(JSON.parse(before.body), 'projectedMonthEndCny')).toBe(false)
 
       const put = await dispatch(server.handlers, 'PUT', BUDGET_PATH, '{"monthlyBudgetCny":250}')
       expect(put.status).toBe(200)
