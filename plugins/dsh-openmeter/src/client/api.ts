@@ -1,6 +1,9 @@
 /**
  * Typed fetch client for the host's /api/openmeter routes (same-origin
- * relative URLs; the host guards loopback+same-origin).
+ * relative URLs; the host guards loopback+same-origin). Operator cashier
+ * surfaces live under /api/openmeter/operator/* and every mutation answer
+ * carries an {@link OperatorAudit}; tenant surfaces live under
+ * /api/openmeter/me/*.
  *
  * @module dsh-openmeter/client/api
  */
@@ -65,6 +68,23 @@ export interface BindingsPayload {
   bindings: Record<string, string>
   observedPresets: string[]
   houseSubject: string
+}
+
+/**
+ * The audit record every operator mutation answer carries (the retired
+ * global cashier paths answered plain `{ok}`; the operator routes add this).
+ * `actor` is present only when the host's auth seam resolved an identity —
+ * the stock loopback deployment never fabricates one.
+ */
+export interface OperatorAudit {
+  /** The mutation that produced this record. */
+  action: 'customer.create' | 'grant.create' | 'block.set' | 'binding.set'
+  /** The mutated customer key, or the preset/customer pair for `binding.set`. */
+  target: string | { presetId: string, customerKey: string }
+  /** Epoch ms of the mutation. */
+  at: number
+  /** The acting operator; present only when the auth seam resolved one. */
+  actor?: { tenantId: string, userId: string }
 }
 
 /**
@@ -179,22 +199,22 @@ export const api = {
   status: (): Promise<StatusPayload> => call<StatusPayload>('/api/openmeter/status'),
   /** GET usage. */
   usage: (): Promise<UsagePayload> => call<UsagePayload>('/api/openmeter/usage?limit=100'),
-  /** GET customers. */
-  customers: (): Promise<CustomersPayload> => call<CustomersPayload>('/api/openmeter/customers'),
-  /** POST create customer. */
-  createCustomer: (key: string, name: string): Promise<{ ok: boolean }> =>
-    call('/api/openmeter/customers', { method: 'POST', body: JSON.stringify({ key, name }) }),
-  /** POST recharge grant. */
-  grant: (customerKey: string, amount: number): Promise<{ ok: boolean }> =>
-    call('/api/openmeter/grants', { method: 'POST', body: JSON.stringify({ customerKey, amount }) }),
-  /** POST manual block/unblock. */
-  block: (customerKey: string, blocked: boolean): Promise<{ ok: boolean }> =>
-    call('/api/openmeter/block', { method: 'POST', body: JSON.stringify({ customerKey, blocked }) }),
-  /** GET bindings. */
-  bindings: (): Promise<BindingsPayload> => call<BindingsPayload>('/api/openmeter/bindings'),
-  /** POST set binding (empty customerKey clears). */
-  bind: (presetId: string, customerKey: string): Promise<{ ok: boolean }> =>
-    call('/api/openmeter/bindings', { method: 'POST', body: JSON.stringify({ presetId, customerKey }) }),
+  /** GET customers (operator route). */
+  customers: (): Promise<CustomersPayload> => call<CustomersPayload>('/api/openmeter/operator/customers'),
+  /** POST create customer (operator route); the answer carries the audit record. */
+  createCustomer: (key: string, name: string): Promise<{ ok: boolean, audit: OperatorAudit }> =>
+    call('/api/openmeter/operator/customers', { method: 'POST', body: JSON.stringify({ key, name }) }),
+  /** POST recharge grant (operator route); the answer carries the audit record. */
+  grant: (customerKey: string, amount: number): Promise<{ ok: boolean, audit: OperatorAudit }> =>
+    call('/api/openmeter/operator/grants', { method: 'POST', body: JSON.stringify({ customerKey, amount }) }),
+  /** POST manual block/unblock (operator route); the answer carries the audit record. */
+  block: (customerKey: string, blocked: boolean): Promise<{ ok: boolean, audit: OperatorAudit }> =>
+    call('/api/openmeter/operator/block', { method: 'POST', body: JSON.stringify({ customerKey, blocked }) }),
+  /** GET bindings (operator route). */
+  bindings: (): Promise<BindingsPayload> => call<BindingsPayload>('/api/openmeter/operator/bindings'),
+  /** POST set binding (operator route, empty customerKey clears); the answer carries the audit record. */
+  bind: (presetId: string, customerKey: string): Promise<{ ok: boolean, audit: OperatorAudit }> =>
+    call('/api/openmeter/operator/bindings', { method: 'POST', body: JSON.stringify({ presetId, customerKey }) }),
   /** GET the caller's own tenant credit summary. */
   summary: (): Promise<SummaryPayload> => call<SummaryPayload>('/api/openmeter/me/summary'),
   /** GET the caller's own tenant usage journal, filtered and paged. */
