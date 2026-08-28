@@ -54,6 +54,7 @@ export class CasdoorAuthService extends Service {
     super(ctx, 'casdoorAuth')
     this.verifier = new IdentityVerifier({
       gatewayJwksUrl: config.gatewayJwksUrl,
+      identityPublicKey: config.identityPublicKey,
       identityHeader: config.identityHeader,
       issuer: config.issuer,
       audience: config.audience,

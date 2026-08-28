@@ -26,6 +26,13 @@ export interface McpServerConfig {
 export interface Config {
   /** JWKS endpoint of the dsh-casdoor-gateway (public keys are public). */
   gatewayJwksUrl: string
+  /**
+   * Pinned gateway public key (ADR-0004: pin first, JWKS fallback): PEM SPKI
+   * or JSON-serialized JWK string. Empty disables the pin (remote-JWKS
+   * behavior unchanged); malformed material fails activation loudly instead
+   * of silently weakening into the JWKS fallback.
+   */
+  identityPublicKey: string
   /** Header the gateway carries the DshIdentityToken in. */
   identityHeader: string
   /** Expected `iss` of the DshIdentityToken. */
@@ -48,6 +55,7 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
   gatewayJwksUrl: 'http://127.0.0.1:3080/.well-known/jwks.json',
+  identityPublicKey: '',
   identityHeader: 'x-dsh-identity',
   issuer: 'dsh-casdoor-gateway',
   audience: 'dsh-casdoor-auth',
@@ -81,6 +89,9 @@ const serverSchema = Schema.object({
 export const Config: Schema<Config> = Schema.object({
   gatewayJwksUrl: Schema.string().default(DEFAULT_CONFIG.gatewayJwksUrl).description(
     'JWKS endpoint of the dsh-casdoor-gateway; the plugin verifies every DshIdentityToken against it.',
+  ),
+  identityPublicKey: Schema.string().default(DEFAULT_CONFIG.identityPublicKey).description(
+    'Pinned gateway identity public key (PEM SPKI or JSON JWK); when set, tokens verify locally with no JWKS fetch. Empty keeps the JWKS fallback.',
   ),
   identityHeader: Schema.string().default(DEFAULT_CONFIG.identityHeader).description(
     'Header the gateway forwards the DshIdentityToken in.',
