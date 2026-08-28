@@ -42,6 +42,8 @@ export interface Config {
   mcpServersByTenant: Readonly<Record<string, readonly McpServerConfig[]>>
   /** Static principal credentials handed to the MCP integration (v1: shared; name→value). */
   credentials: Readonly<Record<string, string>>
+  /** Data directory of the companion dsh-casdoor-gateway service (launch-token handoff). */
+  gatewayDataDir: string
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -54,6 +56,7 @@ export const DEFAULT_CONFIG: Config = {
   mcpServers: [],
   mcpServersByTenant: {},
   credentials: {},
+  gatewayDataDir: '~/.dsh-casdoor-gateway',
 }
 
 // Schemastery's inferred object-schema types do not line up with interfaces
@@ -102,6 +105,9 @@ export const Config: Schema<Config> = Schema.object({
   ),
   credentials: Schema.dict(Schema.string().role('secret')).default({}).description(
     'Static principal credentials (name → value) handed to the MCP integration; v1 is shared across principals.',
+  ),
+  gatewayDataDir: Schema.string().default(DEFAULT_CONFIG.gatewayDataDir).description(
+    'Data directory of the dsh-casdoor-gateway service; the plugin publishes the webserver launch token there for the gateway to exchange.',
   ),
 }) as unknown as Schema<Config>
 

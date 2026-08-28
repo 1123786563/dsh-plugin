@@ -20,6 +20,9 @@
  */
 
 import type { IncomingMessage } from 'node:http'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import {
@@ -74,6 +77,19 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/**
+ * Minimal face of the dsh-client-connection service: only the launch-token
+ * URL is needed, and a static type import would pin another @deepseek-ai
+ * package version that older cores did not ship.
+ */
+interface ConnectionService {
+  authenticatedUrl(baseUrl: string): string
+}
+
+function expandHome(path: string): string {
+  return path === '~' || path.startsWith(`~/`) ? join(homedir(), path.slice(1)) : path
+}
+
 export { Config }
 export type { ConfigShape }
 export { IdentityVerifier }
@@ -97,6 +113,34 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
   // service dependency (works on every plugin's fetches too).
   ctx.inject(['webServer'], scoped => {
     scoped.effect(() => scoped.webServer.tapIndex(inject401Watcher), 'casdoor-auth: 401 watcher')
+  })
+
+  // dsh >= 0.1.2-alpha browser auth: the webserver authenticates every
+  // request with its own signed cookie, minted by exchanging the per-process
+  // launch token. Publish that token to the gateway data dir so the gateway
+  // can mint and attach the cookie on proxied traffic (see
+  // services/casdoor-gateway/src/upstream-auth.ts). Cores without browser
+  // auth (< 0.1.2-alpha) expose no launch token; the block self-skips.
+  ctx.inject(['connection'], scoped => {
+    const connection = scoped.get('connection') as Partial<ConnectionService> | undefined
+    if (connection === undefined || typeof connection.authenticatedUrl !== 'function') return
+    const token = new URL(connection.authenticatedUrl('http://127.0.0.1/')).searchParams.get('token')
+    if (token === null || token === '') {
+      scoped.logger('casdoor-auth').warn(
+        'connection service exposed no launch token; gateway login cannot satisfy dsh web browser auth',
+      )
+      return
+    }
+    const file = join(expandHome(entry.gatewayDataDir), 'webserver-token.json')
+    try {
+      mkdirSync(dirname(file), { recursive: true })
+      writeFileSync(file, `${JSON.stringify({ token, updatedAt: Date.now() })}\n`, { mode: 0o600 })
+    } catch (error) {
+      scoped.logger('casdoor-auth').warn(
+        error instanceof Error ? error : new Error(String(error)),
+        'failed to publish the webserver launch token to the gateway data dir',
+      )
+    }
   })
 
   // The multi-tenant assembly. Declared injects mirror the vendored starter's

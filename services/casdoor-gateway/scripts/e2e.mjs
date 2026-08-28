@@ -15,8 +15,8 @@
 
 import { spawn } from 'node:child_process'
 import http from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdtempSync, rmSync, copyFileSync } from 'node:fs'
+import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -134,6 +134,15 @@ async function main () {
       })
       await new Promise(r => stubUpstream.listen(38080, '127.0.0.1', r))
       console.log('(no dsh on :38080 — spawned stub upstream)')
+    } else {
+      // Real dsh >= 0.1.2-alpha runs browser auth: the dsh-casdoor-auth plugin
+      // publishes the webserver launch token in the gateway's real data dir;
+      // copy it into this run's isolated data dir so the spawned gateway can
+      // mint the upstream cookie (no-op for pre-browser-auth dsh cores).
+      const tokenFile = join(homedir(), '.dsh-casdoor-gateway', 'webserver-token.json')
+      try {
+        copyFileSync(tokenFile, join(dataDir, 'webserver-token.json'))
+      } catch { /* pre-browser-auth dsh: no token file to hand over */ }
     }
     gateway = spawn(process.execPath, [join(ROOT, 'lib', 'server.js')], {
       env: {

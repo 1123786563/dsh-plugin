@@ -8,8 +8,9 @@
  *    fence binds every request to loopback/trusted authorities);
  *  - `origin`, when the browser attached one, is rewritten to the upstream
  *    origin (the fence requires Origin and Host to agree);
- *  - the login cookie is dropped (the dsh side never consumes it) and the
- *    DshIdentityToken header is added.
+ *  - the login cookie is dropped (the dsh side never consumes it), the
+ *    upstream browser-session cookie is attached (dsh >= 0.1.2-alpha browser
+ *    auth), and the DshIdentityToken header is added.
  *
  * @module dsh-casdoor-gateway/proxy
  */
@@ -17,6 +18,7 @@
 import type { IncomingHttpHeaders, Server } from 'node:http'
 import http from 'node:http'
 import type { Duplex } from 'node:stream'
+import type { UpstreamAuth } from './upstream-auth.js'
 
 export interface ProxyTarget {
   readonly upstream: URL
@@ -40,6 +42,7 @@ export function upstreamHeaders(
   headers: IncomingHttpHeaders,
   target: ProxyTarget,
   identityToken: string,
+  upstreamCookie?: string,
 ): Record<string, string> {
   const out: Record<string, string> = {}
   for (const [name, value] of Object.entries(headers)) {
@@ -51,6 +54,7 @@ export function upstreamHeaders(
   out.host = target.upstream.host
   if (headers.origin !== undefined) out.origin = target.upstream.origin
   out[target.identityHeader] = identityToken
+  if (upstreamCookie !== undefined) out.cookie = upstreamCookie
   return out
 }
 
@@ -70,30 +74,52 @@ export function proxyHttpRequest(
   target: ProxyTarget,
   identityToken: string,
   body: Buffer | undefined,
+  auth?: UpstreamAuth,
 ): void {
-  const headers = upstreamHeaders(req.headers, target, identityToken)
-  const upstream = http.request(target.upstream, {
-    method: req.method,
-    headers,
-    path: req.url,
-  })
-  upstream.on('response', upstreamRes => {
-    res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers)
-    upstreamRes.pipe(res)
-  })
-  upstream.on('error', err => {
-    if (res.headersSent) {
-      res.destroy(err)
-      return
+  const send = (upstreamCookie: string | undefined, retried: boolean): void => {
+    const headers = upstreamHeaders(req.headers, target, identityToken, upstreamCookie)
+    const upstream = http.request(target.upstream, {
+      method: req.method,
+      headers,
+      path: req.url,
+    })
+    upstream.on('response', upstreamRes => {
+      // dsh >= 0.1.2-alpha browser auth rejecting our cookie: drop it,
+      // re-exchange the launch token, and replay the request exactly once.
+      if (upstreamRes.statusCode === 401 && auth !== undefined && !retried) {
+        upstreamRes.resume()
+        auth.invalidate()
+        void auth.ensure().then(fresh => {
+          if (fresh === undefined) {
+            res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: 'upstream-auth-unavailable', message: 'the webserver launch token could not be exchanged' }))
+            return
+          }
+          send(fresh, true)
+        })
+        return
+      }
+      res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers)
+      upstreamRes.pipe(res)
+    })
+    upstream.on('error', err => {
+      if (res.headersSent) {
+        res.destroy(err)
+        return
+      }
+      res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ error: 'upstream-unreachable', message: String(err) }))
+    })
+    if (body === undefined || body.length === 0) {
+      upstream.end()
+    } else {
+      upstream.end(body)
     }
-    res.writeHead(502, { 'content-type': 'application/json; charset=utf-8' })
-    res.end(JSON.stringify({ error: 'upstream-unreachable', message: String(err) }))
-  })
-  if (body === undefined || body.length === 0) {
-    upstream.end()
-  } else {
-    upstream.end(body)
   }
+  const ready = auth === undefined ? Promise.resolve(undefined) : auth.ensure()
+  void ready.then(cookie => {
+    send(cookie, false)
+  })
 }
 
 export interface UpgradeDeps<S> {
@@ -102,6 +128,8 @@ export interface UpgradeDeps<S> {
   resolveSession(headers: IncomingHttpHeaders): Promise<S | undefined>
   /** Mint the DshIdentityToken for an accepted upgrade. */
   mint(session: S): Promise<string>
+  /** Upstream browser-auth session; absent on dsh cores without browser auth. */
+  auth?: UpstreamAuth
   onError(error: unknown): void
 }
 
@@ -130,7 +158,8 @@ export function installUpgradeProxy<S>(server: Server, deps: UpgradeDeps<S>): vo
       }
       try {
         const token = await deps.mint(session)
-        const headers = upstreamHeaders(req.headers, deps.target, token)
+        const upstreamCookie = deps.auth === undefined ? undefined : await deps.auth.ensure()
+        const headers = upstreamHeaders(req.headers, deps.target, token, upstreamCookie)
         headers.connection = 'Upgrade'
         headers.upgrade = 'websocket'
         const proxied = http.request(deps.target.upstream, {

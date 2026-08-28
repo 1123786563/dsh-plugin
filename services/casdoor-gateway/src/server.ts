@@ -26,12 +26,15 @@ import { IdentityIssuer } from './identity-token.js'
 import { CasdoorOidc, safeOrgParam, type OidcClient } from './oidc.js'
 import { installUpgradeProxy, proxyHttpRequest } from './proxy.js'
 import { SessionStore, type LoginSession } from './sessions.js'
+import { UpstreamAuth } from './upstream-auth.js'
 
 export interface AppDeps {
   readonly config: GatewayConfig
   readonly store: SessionStore
   readonly issuer: IdentityIssuer
   readonly oidc: OidcClient
+  /** Upstream browser-auth session; absent on dsh cores without browser auth. */
+  readonly auth?: UpstreamAuth
 }
 
 function cookieValue(headers: IncomingHttpHeaders, name: string): string | undefined {
@@ -164,7 +167,7 @@ export function buildApp(deps: AppDeps, options: { logger?: boolean | object } =
       // Public static descriptors the browser fetches without cookies.
       if (isCredentiallessAsset(url.pathname)) {
         reply.hijack()
-        proxyHttpRequest(req.raw, reply.raw, target, '', undefined)
+        proxyHttpRequest(req.raw, reply.raw, target, '', undefined, deps.auth)
         return
       }
       if (wantsHtml(req.method, req.headers.accept)) {
@@ -184,7 +187,7 @@ export function buildApp(deps: AppDeps, options: { logger?: boolean | object } =
     const token = await issuer.mint(session, identityOptions)
     const body = Buffer.isBuffer(req.body) ? req.body : undefined
     reply.hijack()
-    proxyHttpRequest(req.raw, reply.raw, target, token, body)
+    proxyHttpRequest(req.raw, reply.raw, target, token, body, deps.auth)
   })
 
   return app
@@ -204,10 +207,21 @@ export async function main(): Promise<void> {
     organizationClaim: config.organizationClaim,
     rolesClaim: config.rolesClaim,
   })
-  const app = buildApp({ config, store, issuer, oidc })
+  // Upstream browser-auth warnings should reach the app logger, but the
+  // UpstreamAuth instance must exist before buildApp needs it; the closure
+  // forwards once the app (and its logger) exist.
+  let logWarn: (message: string, extra?: Record<string, unknown>) => void = () => {}
+  const auth = new UpstreamAuth(
+    join(config.dataDir, 'webserver-token.json'),
+    config.upstream,
+    { warn: (message, extra) => { logWarn(message, extra) } },
+  )
+  const app = buildApp({ config, store, issuer, oidc, auth })
+  logWarn = (message, extra) => { app.log.warn(extra ?? {}, message) }
   await app.ready()
   installUpgradeProxy<LoginSession>(app.server, {
     target: { upstream: config.upstream, identityHeader: config.identityHeader },
+    auth,
     resolveSession: async headers => {
       const sid = cookieValue(headers, config.cookieName)
       return sid === undefined ? undefined : store.get(sid)
