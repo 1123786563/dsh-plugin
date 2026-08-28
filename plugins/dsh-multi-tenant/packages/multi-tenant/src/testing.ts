@@ -37,7 +37,9 @@ async function withStore<T>(
 /**
  * Assert that `factory` produces stores satisfying the `TenantSessionStore`
  * contract: atomic claim, idempotent same-owner claim, conflict (never
- * overwrite), `get` semantics, and atomic concurrency.
+ * overwrite), `get` semantics, atomic concurrency, and `listByOwner`
+ * owner-scoped filtering with empty result, claim compatibility, and
+ * ascending ordering.
  */
 export async function assertTenantSessionStoreContract(factory: TenantSessionStoreFactory): Promise<void> {
   const alice: SessionOwner = { tenantId: 'acme', userId: 'alice' }
@@ -96,6 +98,43 @@ export async function assertTenantSessionStoreContract(factory: TenantSessionSto
     const conflict = outcomes.filter(o => o === 'conflict').length
     if (created !== 1 || conflict !== 1) fail('atomic-concurrency', JSON.stringify(outcomes))
     if ((await store.get('s1')) === undefined) fail('atomic-owner', 'no owner after concurrent claim')
+  })
+
+  await withStore(factory, async (store) => {
+    await store.claim('s2', alice)
+    await store.claim('s1', bob)
+    await store.claim('s3', eve)
+    await store.claim('s5', alice)
+    await store.claim('s4', eve)
+    const listed = await store.listByOwner('acme', 'alice')
+    if (listed.length !== 2 || listed[0] !== 's2' || listed[1] !== 's5') {
+      fail('list-by-owner-scoped', JSON.stringify(listed))
+    }
+  })
+
+  await withStore(factory, async (store) => {
+    await store.claim('s1', bob)
+    const listed = await store.listByOwner('acme', 'alice')
+    if (listed.length !== 0) fail('list-by-owner-empty', JSON.stringify(listed))
+  })
+
+  await withStore(factory, async (store) => {
+    await store.claim('s1', alice)
+    const listed = await store.listByOwner('acme', 'alice')
+    if (listed.length !== 1 || listed[0] !== 's1') {
+      fail('list-by-owner-after-claim', JSON.stringify(listed))
+    }
+  })
+
+  await withStore(factory, async (store) => {
+    for (const sessionId of ['s5', 's1', 's4', 's2', 's3']) {
+      await store.claim(sessionId, alice)
+    }
+    const listed = await store.listByOwner('acme', 'alice')
+    const expected = ['s1', 's2', 's3', 's4', 's5']
+    if (listed.length !== expected.length || listed.some((id, index) => id !== expected[index])) {
+      fail('list-by-owner-order', JSON.stringify(listed))
+    }
   })
 }
 

@@ -66,6 +66,17 @@ function readOwner(row: unknown): SessionOwner | undefined {
   return { tenantId, userId }
 }
 
+function readSessionId(row: unknown): string {
+  if (typeof row !== 'object' || row === null) {
+    throw new Error('SQLite session store returned a malformed owner row')
+  }
+  const sessionId = Reflect.get(row, 'session_id')
+  if (typeof sessionId !== 'string') {
+    throw new Error('SQLite session store returned a malformed owner row')
+  }
+  return sessionId
+}
+
 /**
  * Durable local-development Session ownership provider.
  *
@@ -79,6 +90,7 @@ export class SQLiteTenantSessionStore extends TenantSessionStore {
   private readonly database: DatabaseSync
   private readonly insertOwner: ReturnType<DatabaseSync['prepare']>
   private readonly selectOwner: ReturnType<DatabaseSync['prepare']>
+  private readonly selectOwnerSessionIds: ReturnType<DatabaseSync['prepare']>
 
   constructor(ctx: Context, config: SQLiteTenantSessionStoreConfig = {}) {
     super(ctx)
@@ -109,6 +121,12 @@ export class SQLiteTenantSessionStore extends TenantSessionStore {
         FROM session_owners
         WHERE session_id = ?
       `)
+      this.selectOwnerSessionIds = database.prepare(`
+        SELECT session_id
+        FROM session_owners
+        WHERE tenant_id = ? AND user_id = ?
+        ORDER BY session_id
+      `)
     } catch (error) {
       database.close()
       throw error
@@ -136,6 +154,10 @@ export class SQLiteTenantSessionStore extends TenantSessionStore {
 
   override async get(sessionId: string): Promise<SessionOwner | undefined> {
     return readOwner(this.selectOwner.get(sessionId))
+  }
+
+  override async listByOwner(tenantId: string, userId: string): Promise<string[]> {
+    return this.selectOwnerSessionIds.all(tenantId, userId).map(row => readSessionId(row))
   }
 }
 

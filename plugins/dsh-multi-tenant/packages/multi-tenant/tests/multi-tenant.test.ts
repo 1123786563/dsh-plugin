@@ -123,6 +123,45 @@ describe('MultiTenantService', () => {
     })
   })
 
+  describe('list sessions by owner', () => {
+    it('returns only the sessions owned by that principal', async () => {
+      await multiTenant.claimSession('s2', alice)
+      await multiTenant.claimSession('s1', bob)
+      await multiTenant.claimSession('s3', eve)
+      await multiTenant.claimSession('s5', alice)
+      await multiTenant.claimSession('s4', eve)
+      await expect(multiTenant.listSessionsByOwner(alice)).resolves.toEqual(['s2', 's5'])
+      await expect(multiTenant.listSessionsByOwner(bob)).resolves.toEqual(['s1'])
+      await expect(multiTenant.listSessionsByOwner(eve)).resolves.toEqual(['s3', 's4'])
+    })
+
+    it('returns an empty array for an owner without sessions', async () => {
+      await multiTenant.claimSession('s1', bob)
+      await expect(multiTenant.listSessionsByOwner(alice)).resolves.toEqual([])
+    })
+
+    it('lists a session immediately after claiming it', async () => {
+      await expect(multiTenant.listSessionsByOwner(alice)).resolves.toEqual([])
+      await multiTenant.claimSession('s1', alice)
+      await expect(multiTenant.listSessionsByOwner(alice)).resolves.toEqual(['s1'])
+    })
+
+    it('returns session ids in ascending order regardless of claim order', async () => {
+      for (const sessionId of ['s5', 's1', 's4', 's2', 's3']) {
+        await multiTenant.claimSession(sessionId, alice)
+      }
+      await expect(multiTenant.listSessionsByOwner(alice)).resolves.toEqual(['s1', 's2', 's3', 's4', 's5'])
+    })
+
+    it('rejects an empty tenantId', async () => {
+      await expect(multiTenant.listSessionsByOwner({ ...alice, tenantId: '' })).rejects.toThrow(ValidationError)
+    })
+
+    it('rejects a whitespace-only tenantId', async () => {
+      await expect(multiTenant.listSessionsByOwner({ ...alice, tenantId: '   ' })).rejects.toThrow(ValidationError)
+    })
+  })
+
   describe('runtime validation', () => {
     it('rejects an empty sessionId', async () => {
       await expect(multiTenant.claimSession('', alice)).rejects.toThrow(ValidationError)
@@ -189,6 +228,9 @@ describe('TenantSessionStore service seam', () => {
       override async get(sessionId: string) {
         return this.owners.get(sessionId)
       }
+      override async listByOwner(): Promise<string[]> {
+        return []
+      }
     }
 
     const ctx = new Context()
@@ -213,6 +255,9 @@ describe('TenantSessionStore service seam', () => {
       }
       override async get(): Promise<SessionOwner | undefined> {
         return undefined
+      }
+      override async listByOwner(): Promise<string[]> {
+        return []
       }
     }
 

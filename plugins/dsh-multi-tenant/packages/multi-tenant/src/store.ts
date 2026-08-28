@@ -32,6 +32,15 @@ export abstract class TenantSessionStore extends Service {
 
   abstract claim(sessionId: string, owner: SessionOwner): Promise<ClaimResult>
   abstract get(sessionId: string): Promise<SessionOwner | undefined>
+
+  /**
+   * List every session id owned by `(tenantId, userId)`, ordered ascending by
+   * session id. The order is the backend's native string order: SQLite BINARY
+   * collation and JavaScript UTF-16 code-unit comparison agree on ASCII but
+   * may differ for some non-ASCII ids, so callers must not rely on the two
+   * backends producing identical order for such ids.
+   */
+  abstract listByOwner(tenantId: string, userId: string): Promise<string[]>
 }
 
 /**
@@ -64,6 +73,14 @@ export class InMemoryTenantSessionStore extends TenantSessionStore {
   override async get(sessionId: string): Promise<SessionOwner | undefined> {
     const owner = this.owners.get(sessionId)
     return owner ? { tenantId: owner.tenantId, userId: owner.userId } : undefined
+  }
+
+  override async listByOwner(tenantId: string, userId: string): Promise<string[]> {
+    const sessionIds: string[] = []
+    for (const [sessionId, owner] of this.owners) {
+      if (owner.tenantId === tenantId && owner.userId === userId) sessionIds.push(sessionId)
+    }
+    return sessionIds.sort()
   }
 }
 
