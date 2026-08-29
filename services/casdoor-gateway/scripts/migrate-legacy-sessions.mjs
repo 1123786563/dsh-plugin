@@ -148,8 +148,9 @@ function makeClient () {
       if (eq > 0) jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim())
     }
   }
+  const cookieHeader = () => [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ')
   return {
-    cookieHeader: () => [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; '),
+    cookieHeader,
     async call (url, options = {}) {
       const headers = { ...(options.headers ?? {}) }
       const cookie = cookieHeader()
