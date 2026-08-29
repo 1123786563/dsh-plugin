@@ -15,12 +15,17 @@
  * Prerequisites:
  *   - docker compose up -d casdoor postgres (repo root; casdoor on :8001)
  *   - something on the dsh private port :38080 — the real `dsh web`, or this
- *     script spawns a stub upstream automatically when nothing listens
+ *     script spawns a stub upstream automatically when nothing listens.
+ *     E2E_UPSTREAM_URL overrides that address (the stub binds the override's
+ *     host:port too), so a free temp port keeps e2e off the live private port
  *   - host mode: gateway built (pnpm build) — the script spawns lib/server.js
  *   - external mode + E2E_RESTART_CMD: the command restarts the external
  *     gateway (e.g. `docker compose --project-directory <repo> restart
  *     casdoor-gateway`); afterwards the login session must survive and the
  *     JWKS kid must be unchanged
+ *   - the walk asserts manifest gating on both arms: unauthenticated
+ *     /manifest.webmanifest gets the gateway's own 401 JSON, an
+ *     authenticated (cookie) fetch is forwarded to the upstream
  *
  * Usage:  node scripts/e2e.mjs
  * Exit 0 = every step passed.
@@ -34,7 +39,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const UPSTREAM = 'http://127.0.0.1:38080'
+const UPSTREAM = process.env.E2E_UPSTREAM_URL ?? 'http://127.0.0.1:38080'
 const CASDOOR = 'http://127.0.0.1:8001'
 const CLIENT_ID = process.env.CASDOOR_CLIENT_ID ?? 'dsh-gateway'
 const CLIENT_SECRET = process.env.CASDOOR_CLIENT_SECRET ?? 'change-me-64-hex'
@@ -191,8 +196,9 @@ async function main () {
       stubUpstream.on('upgrade', (_req, socket) => {
         socket.write('HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: websocket\r\nsec-websocket-accept: sRA13TgOUqUvJdqWFuyzPK2X8tE=\r\n\r\n')
       })
-      await new Promise(r => stubUpstream.listen(38080, '127.0.0.1', r))
-      console.log('(no dsh on :38080 — spawned stub upstream)')
+      const { hostname, port } = new URL(UPSTREAM)
+      await new Promise(r => stubUpstream.listen(port, hostname, r))
+      console.log(`(no upstream at ${UPSTREAM} — spawned stub)`)
     } else if (EXTERNAL_GATEWAY === null) {
       // Real dsh >= 0.1.2-alpha runs browser auth: the dsh-casdoor-auth plugin
       // publishes the webserver launch token in the gateway's real data dir;
@@ -251,7 +257,17 @@ async function main () {
       const body = await res.json().catch(() => ({}))
       record('未登录 /api 返回 401 JSON', res.status === 401 && body.error === 'unauthenticated')
     }
-    // 2b. Unauthenticated WebSocket upgrade is rejected with 401.
+    // 2b. Unauthenticated manifest fetch gets the same bare 401 JSON — the
+    // credentialless whitelist is gone, the upstream stays untouched.
+    {
+      const client = makeClient()
+      const res = await client.call(`${GATEWAY}/manifest.webmanifest`)
+      const body = await res.json().catch(() => ({}))
+      record('未登录 /manifest.webmanifest 返回 401 JSON',
+        res.status === 401 && body.error === 'unauthenticated',
+        `HTTP ${String(res.status)}, ${JSON.stringify(body)}`)
+    }
+    // 2c. Unauthenticated WebSocket upgrade is rejected with 401.
     {
       const result = await upgradeRequest(undefined)
       record('未登录 WS 升级被 401 拒绝', result.status === 401, `status=${String(result.status)}`)
@@ -268,6 +284,13 @@ async function main () {
         `callback=${String(callback.status)} cookie=${hasSid}`)
       record('已登录导航经代理命中上游', home.status === 200 && homeBody.length > 0,
         `HTTP ${String(home.status)}, ${String(homeBody.length)} bytes`)
+
+      // The manifest is just another gated asset once the cookie exists.
+      const manifest = await client.call(`${GATEWAY}/manifest.webmanifest`)
+      const manifestBody = await manifest.text()
+      record('已登录 /manifest.webmanifest 经代理命中上游',
+        manifest.status === 200 && manifestBody.length > 0,
+        `HTTP ${String(manifest.status)}, ${String(manifestBody.length)} bytes`)
 
       const rpc = await client.call(`${GATEWAY}/api/session.list`, {
         method: 'POST',

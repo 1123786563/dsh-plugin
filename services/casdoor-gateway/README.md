@@ -120,9 +120,9 @@ CASDOOR_CLIENT_SECRET=change-me-64-hex \
   node services/casdoor-gateway/scripts/e2e.mjs
 ```
 
-`E2E_GATEWAY_URL` 与 `E2E_GATEWAY_PORT` 同设时 URL 优先生效、PORT 被忽略——PORT 仅作用于宿主 spawn 模式。
+`E2E_GATEWAY_URL` 与 `E2E_GATEWAY_PORT` 同设时 URL 优先生效、PORT 被忽略——PORT 仅作用于宿主 spawn 模式。`E2E_UPSTREAM_URL` 覆盖上游地址（默认 `http://127.0.0.1:38080`，stub 上游同样改绑该端口）——设成一个空闲临时端口（如 38091）即可让 e2e 完全不碰 live 私口 38080。
 
-覆盖：未登录 302/401 → API 登录取码（casdoor `/api/login?oauth参数`，无需浏览器）→ 回调建会话 → 代理命中上游 → WS 升级（未登录 401 / 已登录 101）→ 特权 403 → 重启持久性（仅外部模式）→ 登出 → admin 放行。
+覆盖：未登录 302/401 → API 登录取码（casdoor `/api/login?oauth参数`，无需浏览器）→ 回调建会话 → 代理命中上游 → manifest 门禁（未登录 401 JSON / 已登录转发 200）→ WS 升级（未登录 401 / 已登录 101）→ 特权 403 → 重启持久性（仅外部模式）→ 登出 → admin 放行。
 
 > init_data 的字段以 casdoor 实际版本为准做过一次校对；若某版本行为不符，在 casdoor UI 中核对应用配置即可（种子只影响首启）。
 
