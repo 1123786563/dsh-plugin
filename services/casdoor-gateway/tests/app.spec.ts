@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createLocalJWKSet, jwtVerify } from 'jose'
 import type { AddressInfo } from 'node:net'
 import type { FastifyInstance } from 'fastify'
 import { loadGatewayConfig, type GatewayConfig } from '../src/config.ts'
@@ -51,7 +52,7 @@ beforeAll(async () => {
     req.on('data', chunk => { bodyBytes += chunk.length })
     req.on('end', () => {
       upstreamSeen.push({ method: req.method ?? '', url: req.url ?? '', headers: { ...req.headers }, bodyBytes })
-      if (req.url === '/api/settings.describe' || req.url === '/api/session.list' || req.url === '/') {
+      if (req.url === '/api/settings.describe' || req.url === '/api/session.list' || req.url === '/' || req.url === '/manifest.webmanifest') {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
         return
@@ -160,6 +161,22 @@ describe('unauthenticated gate', () => {
     expect(res.headers.get('location')).toBe('http://idp.test/authorize?state=st1')
     expect(lastBeginReturnTo).toBe('/')
   })
+
+  it('gates an unauthenticated manifest fetch like any asset (401, upstream untouched)', async () => {
+    const before = upstreamSeen.length
+    const res = await fetch(`${gatewayOrigin}/manifest.webmanifest`)
+    expect(res.status).toBe(401)
+    expect(await res.json()).toEqual({ error: 'unauthenticated' })
+    expect(upstreamSeen).toHaveLength(before)
+
+    const navigation = await fetch(`${gatewayOrigin}/manifest.webmanifest`, {
+      redirect: 'manual',
+      headers: { accept: 'text/html,application/xhtml+xml' },
+    })
+    expect(navigation.status).toBe(302)
+    expect(navigation.headers.get('location')).toBe('/login?returnTo=%2Fmanifest.webmanifest')
+    expect(upstreamSeen).toHaveLength(before)
+  })
 })
 
 describe('authenticated proxying', () => {
@@ -234,6 +251,26 @@ describe('authenticated proxying', () => {
       headers: { accept: 'text/html', cookie: `${config.cookieName}=${session.sid}` },
     })
     expect(res.status).toBe(200)
+  })
+
+  it('forwards an authenticated manifest with a minted, fully verifiable identity token', async () => {
+    const session = makeSession([])
+    upstreamSeen.length = 0
+    const res = await fetch(`${gatewayOrigin}/manifest.webmanifest`, {
+      headers: { cookie: `${config.cookieName}=${session.sid}` },
+    })
+    expect(res.status).toBe(200)
+    const seen = upstreamSeen.at(-1)
+    expect(seen?.url).toBe('/manifest.webmanifest')
+    const token = String(seen?.headers[config.identityHeader] ?? '')
+    expect(token.length).toBeGreaterThan(0)
+    const { payload } = await jwtVerify(token, createLocalJWKSet(issuer.jwks()), {
+      algorithms: ['EdDSA'],
+      issuer: config.identityIssuer,
+      audience: config.identityAudience,
+    })
+    expect(payload.tenant).toBe('acme')
+    expect(payload.user).toBe('u1')
   })
 })
 

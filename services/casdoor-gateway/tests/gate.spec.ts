@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   isAdmin,
   isAuthPlanePath,
-  isCredentiallessAsset,
   privilegedMethodOf,
   safeReturnTo,
   wantsHtml,
@@ -33,15 +32,6 @@ describe('auth-plane whitelist', () => {
     expect(isAuthPlanePath('/')).toBe(false)
     expect(isAuthPlanePath('/api/session.list')).toBe(false)
     expect(isAuthPlanePath('/loginx')).toBe(false)
-  })
-})
-
-describe('credentialless assets', () => {
-  it('exempts web manifests (browser fetches them without cookies)', () => {
-    expect(isCredentiallessAsset('/manifest.webmanifest')).toBe(true)
-    expect(isCredentiallessAsset('/foo/bar.webmanifest')).toBe(true)
-    expect(isCredentiallessAsset('/api/session.list')).toBe(false)
-    expect(isCredentiallessAsset('/webmanifest')).toBe(false)
   })
 })
 

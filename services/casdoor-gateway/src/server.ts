@@ -21,7 +21,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
 import cookie from '@fastify/cookie'
 import type { GatewayConfig } from './config.js'
 import { loadGatewayConfig } from './config.js'
-import { isAdmin, isCredentiallessAsset, privilegedMethodOf, safeReturnTo, wantsHtml } from './gate.js'
+import { isAdmin, privilegedMethodOf, safeReturnTo, wantsHtml } from './gate.js'
 import { IdentityIssuer } from './identity-token.js'
 import { CasdoorOidc, safeOrgParam, type OidcClient } from './oidc.js'
 import { installUpgradeProxy, proxyHttpRequest } from './proxy.js'
@@ -164,12 +164,6 @@ export function buildApp(deps: AppDeps, options: { logger?: boolean | object } =
     const session = sessionOf(req)
     const target = { upstream: config.upstream, identityHeader: config.identityHeader }
     if (session === undefined) {
-      // Public static descriptors the browser fetches without cookies.
-      if (isCredentiallessAsset(url.pathname)) {
-        reply.hijack()
-        proxyHttpRequest(req.raw, reply.raw, target, '', undefined, deps.auth)
-        return
-      }
       if (wantsHtml(req.method, req.headers.accept)) {
         const returnTo = safeReturnTo(`${url.pathname}${url.search}`)
         return reply.redirect(`/login?returnTo=${encodeURIComponent(returnTo)}`)

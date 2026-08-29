@@ -21,15 +21,6 @@ export function isAuthPlanePath(pathname: string): boolean {
 }
 
 /**
- * Public static descriptors fetched by the browser WITHOUT credentials (the
- * web-app manifest fetch omits cookies by spec), so they cannot pass the
- * session gate: `*.webmanifest`. Content is a public descriptor — no data.
- */
-export function isCredentiallessAsset(pathname: string): boolean {
-  return pathname.endsWith('.webmanifest')
-}
-
-/**
  * Normalize a user-supplied returnTo into a safe same-origin path.
  * Only site-relative, single-slash, non-backslash paths survive; anything
  * else (absolute URLs, protocol-relative, encoded tricks) becomes '/'.

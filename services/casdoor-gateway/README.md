@@ -68,9 +68,9 @@ cd <deepseek-harness> && pnpm dsh web
 | `/api/*`（fetch/XHR） | 401 JSON | 转发；SPA 内置 watcher 把过期 401 变为跳转 |
 | WebSocket 升级（`/api/events.*`） | 401 拒绝升级 | 双向 pipe 转发 |
 | 特权方法（15 个，见下） | 401 | 非特权角色 403；特权角色转发 |
-| `*.webmanifest` | 转发（浏览器按规范不带 cookie 拉取 manifest，公开描述符免鉴权） | 转发 |
+| `*.webmanifest`（与一切静态资产同） | 401（fetch）/ 302 → `/login`（导航） | 转发（注入 `x-dsh-identity`） |
 
-白名单（不验会话）：`/healthz`、`/.well-known/jwks.json`、`/login`、`/casdoor/callback`、`/logout`、`*.webmanifest`。
+网关自答路径（不验会话，也绝不转发）：`/healthz`、`/.well-known/jwks.json`、`/login`、`/casdoor/callback`、`/logout`；其余一切请求（含 `*.webmanifest`）必过会话门禁，转发时逐请求铸造身份令牌。
 
 ## 多组织（租户）登录入口
 
@@ -120,9 +120,9 @@ CASDOOR_CLIENT_SECRET=change-me-64-hex \
   node services/casdoor-gateway/scripts/e2e.mjs
 ```
 
-`E2E_GATEWAY_URL` 与 `E2E_GATEWAY_PORT` 同设时 URL 优先生效、PORT 被忽略——PORT 仅作用于宿主 spawn 模式。
+`E2E_GATEWAY_URL` 与 `E2E_GATEWAY_PORT` 同设时 URL 优先生效、PORT 被忽略——PORT 仅作用于宿主 spawn 模式。`E2E_UPSTREAM_URL` 覆盖上游地址（默认 `http://127.0.0.1:38080`，stub 上游同样改绑该端口）——设成一个空闲临时端口（如 38091）即可让 e2e 完全不碰 live 私口 38080。
 
-覆盖：未登录 302/401 → API 登录取码（casdoor `/api/login?oauth参数`，无需浏览器）→ 回调建会话 → 代理命中上游 → WS 升级（未登录 401 / 已登录 101）→ 特权 403 → 重启持久性（仅外部模式）→ 登出 → admin 放行。
+覆盖：未登录 302/401 → API 登录取码（casdoor `/api/login?oauth参数`，无需浏览器）→ 回调建会话 → 代理命中上游 → manifest 门禁（未登录 401 JSON / 已登录转发 200）→ WS 升级（未登录 401 / 已登录 101）→ 特权 403 → 重启持久性（仅外部模式）→ 登出 → admin 放行。
 
 > init_data 的字段以 casdoor 实际版本为准做过一次校对；若某版本行为不符，在 casdoor UI 中核对应用配置即可（种子只影响首启）。
 

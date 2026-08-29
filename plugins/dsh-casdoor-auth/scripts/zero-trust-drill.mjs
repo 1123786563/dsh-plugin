@@ -11,7 +11,9 @@
  *      upgrades get no 101 and a torn connection, and four self-minted
  *      attack tokens (wrong key / expired / wrong iss / wrong aud) all veto;
  *   2. positive path through the gateway :30820 — real casdoor password
- *      login (acme/alice), index 200, JS asset 200, RPC non-401/403, WS 101;
+ *      login (acme/alice), index 200, JS asset 200, RPC non-401/403, WS 101,
+ *      and manifest gating both arms — unauthenticated gets the gateway's
+ *      own 401 JSON, logged-in gets the minted forward 200;
  *   3. fail-closed — a short-TTL self-minted token passes observably, dies
  *      with the gateway, the matrix still vetoes with the gateway down, and
  *      a gateway restart recovers the logged-in session from SQLite;
@@ -672,14 +674,27 @@ async function main () {
     record('已登录 WS 升级（dsh_sid cookie）得 101', wsUp.firstLine.startsWith('HTTP/1.1 101'),
       `${wsUp.ended} "${wsUp.firstLine}"`)
 
-    // Record-only open question (ADR-0006 / #19): the browser fetches
-    // webmanifests without cookies; the gateway forwards anonymously and the
-    // guard vetoes. Expected behavior — recorded, never failing the drill.
-    const manifestClient = makeClient()
-    const manifest = await manifestClient.call(`${GATEWAY}/manifest.webmanifest`)
+    // Manifest gating (ADR-0006 / #19): a manifest link without
+    // `crossorigin` has credentials mode "same-origin", so logged-in
+    // browsers DO send cookies — and since #19 the gateway mints+injects
+    // identity for ALL forwarded requests, anonymous special case gone.
+    // Unauthenticated arm: the gateway's own 401 JSON answers before any
+    // forward (asserts the gateway gate, NOT the guard's fallback text).
+    // Logged-in arm: the minted forward reaches the real dsh static face,
+    // and the guard verifying the token = end-to-end proof of a valid
+    // x-dsh-identity.
+    const anonManifestClient = makeClient()
+    const anonManifest = await anonManifestClient.call(`${GATEWAY}/manifest.webmanifest`)
+    const anonManifestBody = await anonManifest.json().catch(() => ({}))
+    record('未登录 GET /manifest.webmanifest → 网关自身 401 JSON（不再匿名转发）',
+      anonManifest.status === 401 && anonManifestBody.error === 'unauthenticated',
+      `HTTP ${String(anonManifest.status)} body=${JSON.stringify(anonManifestBody)}`)
+
+    const manifest = await client.call(`${GATEWAY}/manifest.webmanifest`)
     const manifestBody = await manifest.text().catch(() => '')
-    note('GET /manifest.webmanifest 经网关匿名转发 → 私口守卫 401（预期行为，开放问题）',
-      `HTTP ${String(manifest.status)} body=${JSON.stringify(manifestBody.slice(0, 40))}`)
+    record('已登录 GET /manifest.webmanifest 经铸造转发 200（守卫验过 x-dsh-identity）',
+      manifest.status === 200 && manifestBody.length > 0,
+      `HTTP ${String(manifest.status)} ${String(manifestBody.length)} bytes`)
 
     // Fail-closed drill.
     phase('fail-closed 演练（TTL 5s）')
