@@ -11,6 +11,10 @@ import type { WebRequestPrincipal } from '../src/guard.ts'
  * REAL MultiTenantService (in-memory store), mirroring the host
  * sessionController contract (principal arrives as unknown; the host
  * fail-closes principal-less requests before these callbacks ever run).
+ *
+ * Issue #23: the onSessionCreated observer auto-claims stock-UI created and
+ * fork-derived sessions to the request principal over the same real kernel;
+ * every claim failure resolves inside the callback with a warn.
  */
 
 const alice: WebRequestPrincipal = { tenantId: 'acme', userId: 'alice', roles: [] }
@@ -127,6 +131,129 @@ describe('createSessionFilterHooks', () => {
       const check = hooks().accessCheck!
       await expect(check(undefined, 'sa1')).resolves.toBe(false)
       await expect(check({ tenantId: 'acme', userId: 'alice', roles: 'dsh-admin' }, 'sa1')).resolves.toBe(false)
+    })
+  })
+
+  describe('onSessionCreated', () => {
+    let warn: ReturnType<typeof vi.fn>
+
+    beforeEach(() => {
+      warn = vi.fn()
+    })
+
+    /** Hooks over the real kernel with the creation auto-claim wiring attached. */
+    function claimingHooks(adminRoles: readonly string[] = ['dsh-admin']): SessionFilterHooksLike {
+      const deps: SessionFilterDeps = {
+        listSessionsByOwner: p => multiTenant.listSessionsByOwner(p),
+        canAccessSession: (p, sessionId) => multiTenant.canAccessSession(p, sessionId),
+        claimSession: (p, sessionId) => multiTenant.claimSession(sessionId, p),
+        warn,
+      }
+      return createSessionFilterHooks(deps, adminRoles)
+    }
+
+    it('claims a created session to the request principal, visible in the same turn (create contract)', async () => {
+      await multiTenant.claimSession('sb1', bob) // someone else's row the filter must drop
+      const hooks = claimingHooks()
+      // The host awaits the notifier before the create response settles, so
+      // ownership and list visibility hold immediately after this await.
+      await hooks.onSessionCreated!(alice, 's-new')
+      await expect(multiTenant.getSessionOwner('s-new')).resolves.toEqual({ tenantId: 'acme', userId: 'alice' })
+      const rows = [{ sessionId: 'sb1' }, { sessionId: 's-new' }]
+      await expect(hooks.listFilter!(alice, rows)).resolves.toEqual([{ sessionId: 's-new' }])
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    it('claims a fork-derived child session id to the forking principal (fork contract)', async () => {
+      await claimingHooks().onSessionCreated!(alice, 'fork-child-1')
+      await expect(multiTenant.getSessionOwner('fork-child-1')).resolves.toEqual({ tenantId: 'acme', userId: 'alice' })
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    it('adopts a bridge-preclaimed session idempotently for the same principal (both entrances, one terminal state)', async () => {
+      await multiTenant.claimSession('s-bridge', alice) // /_dsh-multi-tenant/agents/create pre-claim
+      await expect(claimingHooks().onSessionCreated!(alice, 's-bridge')).resolves.toBeUndefined()
+      await expect(multiTenant.getSessionOwner('s-bridge')).resolves.toEqual({ tenantId: 'acme', userId: 'alice' })
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    it('fail-closes a conflicting claimer: warns with session id and principal, keeps ownership, denies visibility', async () => {
+      await multiTenant.claimSession('s-bridge', alice)
+      const hooks = claimingHooks()
+      await expect(hooks.onSessionCreated!(bob, 's-bridge')).resolves.toBeUndefined()
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0][0]).toContain('s-bridge')
+      expect(warn.mock.calls[0][0]).toContain('globex')
+      expect(warn.mock.calls[0][0]).toContain('bob')
+      await expect(multiTenant.getSessionOwner('s-bridge')).resolves.toEqual({ tenantId: 'acme', userId: 'alice' })
+      await expect(hooks.accessCheck!(bob, 's-bridge')).resolves.toBe(false)
+    })
+
+    it('claims for an admin principal as well: ownership is bookkeeping, not a visibility exemption', async () => {
+      await claimingHooks().onSessionCreated!(admin, 's-admin')
+      await expect(multiTenant.getSessionOwner('s-admin')).resolves.toEqual({ tenantId: 'dsh-ops', userId: 'dsh-admin' })
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    it('skips claiming and warns for malformed principals, never throwing', async () => {
+      const notifier = claimingHooks().onSessionCreated!
+      const malformed: readonly unknown[] = [
+        undefined,
+        null,
+        'alice',
+        { tenantId: 'acme', userId: 'alice' },
+        { tenantId: 'acme', userId: 'alice', roles: 'dsh-admin' },
+      ]
+      for (const principal of malformed) {
+        await expect(notifier(principal, 's-x'), `principal=${JSON.stringify(principal)}`).resolves.toBeUndefined()
+      }
+      expect(warn).toHaveBeenCalledTimes(malformed.length)
+      expect(warn.mock.calls[0][0]).toContain('s-x')
+      await expect(multiTenant.getSessionOwner('s-x')).resolves.toBeUndefined()
+    })
+
+    it('never rethrows a store failure: resolves and warns with session, principal, and cause', async () => {
+      const deps: SessionFilterDeps = {
+        listSessionsByOwner: p => multiTenant.listSessionsByOwner(p),
+        canAccessSession: (p, sessionId) => multiTenant.canAccessSession(p, sessionId),
+        claimSession: vi.fn().mockRejectedValue(new Error('store offline')),
+        warn,
+      }
+      await expect(createSessionFilterHooks(deps, ['dsh-admin']).onSessionCreated!(alice, 's-fail'))
+        .resolves.toBeUndefined()
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0][0]).toContain('s-fail')
+      expect(warn.mock.calls[0][0]).toContain('acme')
+      expect(warn.mock.calls[0][0]).toContain('alice')
+      expect(warn.mock.calls[0][0]).toContain('store offline')
+    })
+
+    it('settles concurrent distinct-id creations and lists every new session for the creator', async () => {
+      const notifier = claimingHooks().onSessionCreated!
+      const ids = Array.from({ length: 8 }, (_, i) => `s-race-${i}`)
+      await Promise.all(ids.map(id => notifier(alice, id)))
+      await expect(multiTenant.listSessionsByOwner(alice)).resolves.toEqual(expect.arrayContaining(ids))
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    it('resolves concurrent same-id same-principal double claims (created + idempotent)', async () => {
+      const notifier = claimingHooks().onSessionCreated!
+      await Promise.all([notifier(alice, 's-twin'), notifier(alice, 's-twin')])
+      await expect(multiTenant.getSessionOwner('s-twin')).resolves.toEqual({ tenantId: 'acme', userId: 'alice' })
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    it('resolves concurrent same-id cross-principal claims with exactly one owner and a warned loser', async () => {
+      const notifier = claimingHooks().onSessionCreated!
+      const settled = await Promise.allSettled([notifier(alice, 's-duel'), notifier(bob, 's-duel')])
+      expect(settled.map(result => result.status)).toEqual(['fulfilled', 'fulfilled'])
+      const owner = await multiTenant.getSessionOwner('s-duel')
+      expect([
+        { tenantId: 'acme', userId: 'alice' },
+        { tenantId: 'globex', userId: 'bob' },
+      ]).toContainEqual(owner)
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0][0]).toContain('s-duel')
     })
   })
 
