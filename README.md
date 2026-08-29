@@ -17,7 +17,7 @@ DeepSeek Harness（DSH）插件集合 monorepo。每个子目录 `plugins/<name>
 
 | 目录 | 说明 |
 | --- | --- |
-| `services/casdoor-gateway` | Casdoor 认证网关：持有公口，OIDC 登录（授权码+PKCE）、SQLite 登录会话、特权方法角色门禁、HTTP/WebSocket 全量转发到 loopback 私口上的 dsh webserver |
+| `services/casdoor-gateway` | Casdoor 认证网关（根 compose 服务 `casdoor-gateway`）：持有公口，OIDC 登录（授权码+PKCE）、SQLite 登录会话、特权方法角色门禁、HTTP/WebSocket 全量转发到 loopback 私口上的 dsh webserver |
 | `services/higress-gateway` | Higress AI 网关本地部署模板：官方一键安装封装（env 驱动端口）+ 冒烟脚本；配套 `plugins/dsh-higress` |
 | `services/openmeter` | 根 compose 里 OpenMeter fork 栈的配置（`openmeter.yaml`）与 Postgres 初始化 SQL；配套 `plugins/dsh-openmeter` |
 | `services/nocobase` | NocoBase 的 Casdoor 认证插件源码与构建（`@dsh/plugin-auth-casdoor`，构建产物直挂进容器）；配套 `plugins/dsh-nocobase` |
@@ -27,12 +27,13 @@ DeepSeek Harness（DSH）插件集合 monorepo。每个子目录 `plugins/<name>
 所有容器化外部依赖集中在根目录 `docker-compose.yml`，仓库根一条命令拉起：
 
 ```sh
-docker compose up -d        # casdoor（认证 IdP）+ OpenMeter fork 栈（计费）
+docker compose up -d        # casdoor（认证 IdP）+ casdoor-gateway（认证网关）+ OpenMeter fork 栈（计费）
 ```
 
 | 服务 | 宿主端口 | 服务的插件 |
 | --- | --- | --- |
 | casdoor | `127.0.0.1:8001` | dsh-casdoor-auth / services/casdoor-gateway / dsh-nocobase |
+| casdoor-gateway | `127.0.0.1:3080`（`GATEWAY_HOST_PORT` 可改映射端口） | dsh-casdoor-auth 的公口入口（容器经 `host.docker.internal:38080` 回连宿主 dsh 私口；凭据经 `services/casdoor-gateway/.env`） |
 | openmeter（fork 全栈：kafka/clickhouse/postgres/redis + server/sink/balance/billing） | `127.0.0.1:8888`（插件默认 endpoint） | dsh-openmeter |
 | nocobase（+ nocobase-postgres） | `127.0.0.1:13000` | dsh-nocobase |
 

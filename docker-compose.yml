@@ -8,6 +8,7 @@
 #
 # 端口（全部只绑 loopback）：
 #   casdoor    127.0.0.1:8001   认证 IdP（宿主 8000 常被占用，见 casdoor-gateway README）
+#   casdoor-gateway  127.0.0.1:3080   认证网关公口（GATEWAY_HOST_PORT 可覆盖映射端口）
 #   openmeter  127.0.0.1:8888   计费 API（dsh-openmeter 插件的默认 endpoint）
 #   nocobase   127.0.0.1:13000  低代码平台（dsh-nocobase 插件的依赖，casdoor OIDC 登录）
 #   kafka / clickhouse / postgres / redis 不映射宿主端口，仅在 compose 网络内互通
@@ -54,6 +55,44 @@ services:
       - casdoor-data:/conf
       - ./services/casdoor-gateway/docker/app.ini:/conf/app.conf:ro
       - ./services/casdoor-gateway/docker/init_data.json:/init_data.json:ro
+
+  # 认证网关：挡在宿主 dsh 之前的公口（OIDC 登录 + 会话 + 全量转发）。
+  # 凭据经 env_file 透传（services/casdoor-gateway/.env，gitignored，
+  # CASDOOR_CLIENT_ID/SECRET 与 casdoor 种子一致）；environment 覆盖 env_file
+  # 的监听面（容器内 0.0.0.0:3080，端口映射仍只绑 loopback）。
+  # 端口/公网地址参数化：GATEWAY_HOST_PORT 与 GATEWAY_PUBLIC_URL 必须成对
+  # 覆盖（redirect URI 与映射端口一致），默认 3080 即正式形态。
+  # issuer 内外分离：浏览器可见的 authorize/redirect 走 CASDOOR_ISSUER
+  # （宿主位 8001）；网关自身发起的 discovery/token/JWKS 走内部基址
+  # CASDOOR_INTERNAL_ISSUER（compose 网络服务名 casdoor:8000，IdP 流量不出网）。
+  # upstream 指向 host.docker.internal:38080（dsh 本体留在宿主私口）；
+  # 会话 SQLite 与 Ed25519 密钥对持久化在 casdoor-gateway-data 卷——容器
+  # 重建不换钥（JWKS kid 不变）。镜像 slim 无 curl/wget，healthcheck 用 node
+  # 内置 fetch（同 nocobase 先例）。
+  casdoor-gateway:
+    build: { context: ., dockerfile: services/casdoor-gateway/Dockerfile }
+    container_name: dsh-casdoor-gateway
+    restart: unless-stopped
+    depends_on: [casdoor]
+    env_file: [./services/casdoor-gateway/.env]
+    ports:
+      - "127.0.0.1:${GATEWAY_HOST_PORT:-3080}:3080"
+    environment:
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "3080"
+      GATEWAY_PUBLIC_URL: ${GATEWAY_PUBLIC_URL:-http://127.0.0.1:3080}
+      DSH_UPSTREAM_URL: http://host.docker.internal:38080
+      CASDOOR_ISSUER: http://127.0.0.1:8001
+      CASDOOR_INTERNAL_ISSUER: http://casdoor:8000
+      GATEWAY_DATA_DIR: /data
+    volumes:
+      - casdoor-gateway-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   # ---- 计费：OpenMeter fork 栈（dsh-openmeter 插件的依赖）------------------
   kafka:
@@ -234,6 +273,7 @@ services:
 
 volumes:
   casdoor-data:
+  casdoor-gateway-data:
   om-pg-data:
   om-kafka-data:
   om-ch-data:

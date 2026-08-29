@@ -3,17 +3,30 @@
  * Manual end-to-end walk of the casdoor login gate (Q15: vitest units cover
  * the app; this exercises the REAL casdoor + gateway + upstream chain).
  *
+ * Modes:
+ *   host (default)    spawn lib/server.js on 127.0.0.1:${E2E_GATEWAY_PORT}
+ *                     (default 3099: the live casdoor application object
+ *                     authorizes redirect URIs on 3080/3099 only — 30820 is
+ *                     not in the list) with a throwaway data dir
+ *   external          E2E_GATEWAY_URL set: run the whole chain against an
+ *                     already-running gateway (e.g. the compose container);
+ *                     nothing is spawned, stopped, or cleaned up here
+ *
  * Prerequisites:
- *   - docker compose up -d in services/casdoor-gateway/docker (casdoor :8000)
+ *   - docker compose up -d casdoor postgres (repo root; casdoor on :8001)
  *   - something on the dsh private port :38080 — the real `dsh web`, or this
  *     script spawns a stub upstream automatically when nothing listens
- *   - gateway built (pnpm build) — the script spawns lib/server.js itself
+ *   - host mode: gateway built (pnpm build) — the script spawns lib/server.js
+ *   - external mode + E2E_RESTART_CMD: the command restarts the external
+ *     gateway (e.g. `docker compose --project-directory <repo> restart
+ *     casdoor-gateway`); afterwards the login session must survive and the
+ *     JWKS kid must be unchanged
  *
  * Usage:  node scripts/e2e.mjs
  * Exit 0 = every step passed.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, execSync } from 'node:child_process'
 import http from 'node:http'
 import { mkdtempSync, rmSync, copyFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
@@ -21,11 +34,17 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-const GATEWAY = 'http://127.0.0.1:30820'
 const UPSTREAM = 'http://127.0.0.1:38080'
 const CASDOOR = 'http://127.0.0.1:8001'
 const CLIENT_ID = process.env.CASDOOR_CLIENT_ID ?? 'dsh-gateway'
 const CLIENT_SECRET = process.env.CASDOOR_CLIENT_SECRET ?? 'change-me-64-hex'
+const EXTERNAL_GATEWAY = process.env.E2E_GATEWAY_URL ?? null
+const RESTART_CMD = process.env.E2E_RESTART_CMD ?? null
+// Host mode only. Must match a redirect URI seeded in the casdoor
+// application (docker/init_data.json): 3080 (production) or 3099 (this
+// default — frees 3080 for the live gateway while staying seeded).
+const GATEWAY_PORT = process.env.E2E_GATEWAY_PORT ?? '3099'
+const GATEWAY = EXTERNAL_GATEWAY ?? `http://127.0.0.1:${GATEWAY_PORT}`
 
 function dirname (p) { return p.slice(0, p.lastIndexOf('/')) }
 
@@ -75,6 +94,42 @@ async function listening (url) {
   try { await fetch(url); return true } catch { return false }
 }
 
+async function jwksKid () {
+  const res = await fetch(`${GATEWAY}/.well-known/jwks.json`)
+  const body = await res.json()
+  return body.keys?.[0]?.kid ?? null
+}
+
+/**
+ * Bare WebSocket upgrade against /api/events.mux (same shape as
+ * tests/app.spec.ts upgradeRequest): resolves 'upgraded' on the 101 event,
+ * or the HTTP status the gate answered with.
+ */
+function upgradeRequest (cookie) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(`${GATEWAY}/api/events.mux`, {
+      method: 'GET',
+      headers: {
+        connection: 'Upgrade',
+        upgrade: 'websocket',
+        'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        'sec-websocket-version': '13',
+        ...(cookie === undefined ? {} : { cookie }),
+      },
+    })
+    req.on('upgrade', (_res, socket) => {
+      socket.destroy()
+      resolve({ status: 'upgraded' })
+    })
+    req.on('response', res => {
+      res.resume()
+      resolve({ status: res.statusCode ?? 0 })
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
 /**
  * Casdoor password login over its API. The SPA's own flow passes the OAuth
  * authorize parameters as a query on /api/login, and the response's `data`
@@ -119,7 +174,11 @@ async function casdoorLoginAndGetCode (client, username, organization, password)
 }
 
 async function main () {
-  const dataDir = mkdtempSync(join(tmpdir(), 'dsh-gw-e2e-'))
+  if (RESTART_CMD !== null && EXTERNAL_GATEWAY === null) {
+    console.error('E2E_RESTART_CMD is only available in external mode (set E2E_GATEWAY_URL)')
+    process.exit(1)
+  }
+  let dataDir = null
   let stubUpstream = null
   let gateway = null
   try {
@@ -134,32 +193,38 @@ async function main () {
       })
       await new Promise(r => stubUpstream.listen(38080, '127.0.0.1', r))
       console.log('(no dsh on :38080 — spawned stub upstream)')
-    } else {
+    } else if (EXTERNAL_GATEWAY === null) {
       // Real dsh >= 0.1.2-alpha runs browser auth: the dsh-casdoor-auth plugin
       // publishes the webserver launch token in the gateway's real data dir;
       // copy it into this run's isolated data dir so the spawned gateway can
       // mint the upstream cookie (no-op for pre-browser-auth dsh cores).
       const tokenFile = join(homedir(), '.dsh-casdoor-gateway', 'webserver-token.json')
       try {
+        dataDir = mkdtempSync(join(tmpdir(), 'dsh-gw-e2e-'))
         copyFileSync(tokenFile, join(dataDir, 'webserver-token.json'))
       } catch { /* pre-browser-auth dsh: no token file to hand over */ }
     }
-    gateway = spawn(process.execPath, [join(ROOT, 'lib', 'server.js')], {
-      env: {
-        ...process.env,
-        GATEWAY_HOST: '127.0.0.1',
-        GATEWAY_PORT: '30820',
-        GATEWAY_PUBLIC_URL: GATEWAY,
-        DSH_UPSTREAM_URL: UPSTREAM,
-        CASDOOR_ISSUER: CASDOOR,
-        CASDOOR_CLIENT_ID: CLIENT_ID,
-        CASDOOR_CLIENT_SECRET: CLIENT_SECRET,
-        GATEWAY_DATA_DIR: dataDir,
-        GATEWAY_COOKIE_NAME: 'dsh_sid',
-        LOG_LEVEL: 'warn',
-      },
-      stdio: ['ignore', 'inherit', 'inherit'],
-    })
+    if (EXTERNAL_GATEWAY === null) {
+      if (dataDir === null) dataDir = mkdtempSync(join(tmpdir(), 'dsh-gw-e2e-'))
+      gateway = spawn(process.execPath, [join(ROOT, 'lib', 'server.js')], {
+        env: {
+          ...process.env,
+          GATEWAY_HOST: '127.0.0.1',
+          GATEWAY_PORT,
+          GATEWAY_PUBLIC_URL: GATEWAY,
+          DSH_UPSTREAM_URL: UPSTREAM,
+          CASDOOR_ISSUER: CASDOOR,
+          CASDOOR_CLIENT_ID: CLIENT_ID,
+          CASDOOR_CLIENT_SECRET: CLIENT_SECRET,
+          GATEWAY_DATA_DIR: dataDir,
+          GATEWAY_COOKIE_NAME: 'dsh_sid',
+          LOG_LEVEL: 'warn',
+        },
+        stdio: ['ignore', 'inherit', 'inherit'],
+      })
+    } else {
+      console.log(`(external gateway mode — full chain against ${GATEWAY})`)
+    }
     await waitFor(`${GATEWAY}/healthz`, 'gateway')
 
     // 1. Unauthenticated navigation bounces to the IdP.
@@ -186,6 +251,11 @@ async function main () {
       const body = await res.json().catch(() => ({}))
       record('未登录 /api 返回 401 JSON', res.status === 401 && body.error === 'unauthenticated')
     }
+    // 2b. Unauthenticated WebSocket upgrade is rejected with 401.
+    {
+      const result = await upgradeRequest(undefined)
+      record('未登录 WS 升级被 401 拒绝', result.status === 401, `status=${String(result.status)}`)
+    }
     // 3. Full login for a tenant user, then authenticated proxying.
     {
       const client = makeClient()
@@ -207,12 +277,35 @@ async function main () {
       record('已登录 /api 经代理转发（非 401/403）', rpc.status === 200 || rpc.status === 404,
         `HTTP ${String(rpc.status)}`)
 
+      // 3b. Authenticated WebSocket upgrade pipes to the upstream (101).
+      const ws = await upgradeRequest(client.cookieHeader())
+      record('已登录 WS 升级 101 建立双向 pipe', ws.status === 'upgraded',
+        `status=${ws.status === 'upgraded' ? '101' : String(ws.status)}`)
+
       const priv = await client.call(`${GATEWAY}/api/settings.describe`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: '{"rpcId":"e2e3"}',
       })
       record('普通用户调特权方法被 403', priv.status === 403)
+
+      // 3c. External mode + E2E_RESTART_CMD: the gateway restarts underneath
+      // the live session — the cookie must keep working and the JWKS kid
+      // (Ed25519 keypair in the data dir) must survive.
+      if (RESTART_CMD !== null) {
+        const kidBefore = await jwksKid()
+        execSync(RESTART_CMD, { stdio: 'inherit' })
+        await waitFor(`${GATEWAY}/healthz`, 'gateway after restart')
+        const after = await client.call(`${GATEWAY}/api/session.list`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{"rpcId":"e2e-restart"}',
+        })
+        record('网关重启后同一 cookie 仍可用（非 401/403）', after.status === 200 || after.status === 404, `HTTP ${String(after.status)}`)
+        const kidAfter = await jwksKid()
+        record('网关重启后 JWKS kid 不变', kidAfter !== null && kidAfter === kidBefore,
+          `${String(kidBefore)} → ${String(kidAfter)}`)
+      }
 
       const logout = await client.call(`${GATEWAY}/logout`)
       record('登出 302 到 IdP 且清 cookie', logout.status === 302 && (logout.headers.get('location') ?? '').includes(CASDOOR),
@@ -240,13 +333,34 @@ async function main () {
   } catch (error) {
     record('e2e 执行', false, String(error))
   } finally {
-    gateway?.kill('SIGTERM')
-    stubUpstream?.close()
-    setTimeout(() => rmSync(dataDir, { recursive: true, force: true }), 200)
+    // External mode owns nothing: the caller's gateway stays running.
+    if (EXTERNAL_GATEWAY === null) {
+      // SIGTERM, then SIGKILL after a grace: an open proxied WS pipe can
+      // leave the gateway's graceful close pending forever, and rmSync must
+      // not race a live process still writing the data dir.
+      if (gateway !== null) {
+        const exited = gateway.exitCode === null
+          ? new Promise(resolve => gateway.once('exit', resolve))
+          : Promise.resolve()
+        gateway.kill('SIGTERM')
+        const force = setTimeout(() => gateway.kill('SIGKILL'), 2000)
+        await exited
+        clearTimeout(force)
+      }
+      if (dataDir !== null) rmSync(dataDir, { recursive: true, force: true })
+    }
+    if (stubUpstream !== null) {
+      stubUpstream.close()
+      // close() keeps existing sockets; a proxied WS pipe never idles, so
+      // destroy them or the event loop never drains.
+      stubUpstream.closeAllConnections()
+    }
   }
   const failed = results.filter(r => !r.ok).length
   console.log(`\n${failed === 0 ? 'ALL PASS' : String(failed) + ' FAILED'} (${String(results.length)} steps)`)
-  process.exit(failed === 0 ? 0 : 1)
+  // exitCode, not process.exit: cleanup above already ran synchronously, and
+  // the loop must drain so the process exits naturally.
+  process.exitCode = failed === 0 ? 0 : 1
 }
 
 void main()
