@@ -55,7 +55,80 @@ pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
 | `gatewayDataDir` | `~/.dsh-casdoor-gateway`（env `DSH_CASDOOR_GATEWAY_DATA_DIR`） | 网关数据目录：插件把本进程 webserver launch token 以 0600 写入其中（`webserver-token.json`），网关 UpstreamAuth 读取它铸造 dsh 浏览器认证 cookie |
 | `guardEnabled` | `false`（env `DSH_CASDOOR_GUARD`，`1`/`true` 开、其余关） | zero-trust 私口守卫开关（逃生门：默认关＝门禁前行为零差异）；开则认领宿主唯一守卫席位，无有效 DshIdentityToken / launch token 的一切 HTTP/WS 请求 401 固定文案，宿主需已应用 dsh-request-guard patch（缺失则激活大声失败），语义与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md) |
 
-端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`；演练（rehearsal drill）另以 `DSH_CASDOOR_DSH_PORT=38081` 起隔离私口的第二实例，不占用正式 `38080`。
+端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`；演练（rehearsal drill）另起隔离私口 `38081` 的第二实例，不占用正式 `38080`（该环境通道现产出字符串端口，drill 改走 profile patch 数值端口，全流程见[演练手册](#演练手册zero-trust-私口守卫-rehearsal-drill)）。
+
+## 演练手册（zero-trust 私口守卫 rehearsal drill）
+
+[`scripts/zero-trust-drill.mjs`](./scripts/zero-trust-drill.mjs) 对**隔离实例**复演守卫全行为：直连负路径矩阵（12 条 HTTP 路径/方法全 401 固定文案、WS 直连无 101 被拆、自铸攻击 token 四臂）、经网关正向五步（真实 casdoor 登录 / index / JS 资产 / RPC / WS 101）、fail-closed（短 TTL token 随网关死亡失效、矩阵复跑、重启后会话不掉线）、逃生门三步。脚本自起网关与 dsh 子进程、用后自清；全程只碰 `38081`/`30820`/`8001`，不触碰宿主 3080 live 实例与 `38080` 正式私口。
+
+### 前置
+
+```bash
+# 本 worktree 内构建网关（drill 以 node 直跑 services/casdoor-gateway/lib/server.js，只读复用）
+pnpm --filter dsh-casdoor-gateway build
+
+# 主仓起 casdoor（幂等；种子数据：acme/alice 等）
+cd /Users/wuyongjun/trea/dsh-plugin && docker compose up -d casdoor postgres
+```
+
+### 搭建宿主 rehearsal worktree（只读基线 + patch，不 commit）
+
+宿主核心需带守卫席位（ADR-0004 的 dsh-request-guard patch）。以变量代路径：`HOST_REPO`＝宿主 deepseek-harness 检出，`PLUGIN_WT`＝本 worktree：
+
+```bash
+HOST_REPO=/Users/wuyongjun/trea/deepseek-harness
+PLUGIN_WT=/Users/wuyongjun/trea/dsh-plugin/.worktrees/gate-v2-18
+
+# 1. detached 基线 worktree + 应用守卫 patch（5 文件改动，留在工作区不 commit）
+git -C "$HOST_REPO" worktree add --detach .worktrees/patch-rehearsal-g18 cd5ef8148158c3a752a658978873241fdf8e2bbc
+bash "$PLUGIN_WT/scripts/host-patches/apply.sh" --repo "$HOST_REPO/.worktrees/patch-rehearsal-g18"
+cd "$HOST_REPO/.worktrees/patch-rehearsal-g18"
+pnpm install --frozen-lockfile
+pnpm run build        # 全量构建：web profile 启动需要全部 client bundle（仅 build:web 会在 boot 报 MissingClientBundleError）
+
+# 2. 构建插件并 link 进隔离 profile（DSH_HOME 在 $RT 内；与正式 ~/.dsh 完全隔离）
+cd "$PLUGIN_WT" && pnpm install
+pnpm --filter dsh-casdoor-auth build
+pnpm --filter dsh-multi-tenant... build
+RT=$(mktemp -d /tmp/zero-trust-g18-XXXX)
+DSH_HOME=$RT/dsh-home pnpm -C "$HOST_REPO/.worktrees/patch-rehearsal-g18" dsh \
+  plugin --profile web add link:$PLUGIN_WT/plugins/dsh-casdoor-auth
+DSH_HOME=$RT/dsh-home pnpm -C "$HOST_REPO/.worktrees/patch-rehearsal-g18" dsh \
+  plugin --profile web add link:$PLUGIN_WT/plugins/dsh-multi-tenant/packages/multi-tenant
+```
+
+### 运行 drill
+
+```bash
+cd "$PLUGIN_WT"
+node plugins/dsh-casdoor-auth/scripts/zero-trust-drill.mjs \
+  --host-worktree "$HOST_REPO/.worktrees/patch-rehearsal-g18" \
+  --rt "$RT"
+```
+
+- `--rt` **必须**与上面 link 插件时的 `$RT` 同一目录（隔离 web profile 落在 `$RT/dsh-home`，脚本不重建它）。
+- drill 自起网关（`GATEWAY_IDENTITY_TTL_SEC=5` 压缩 fail-closed 等待）与 dsh 第二实例（`pnpm dsh web --no-open`，`DSH_CASDOOR_GUARD=1` + 钉公钥），结束自动杀尽子进程并 `rm -rf $RT`。
+- 私口 38081 由 drill 写入 profile 用户 patch 层（`$RT/dsh-home/profiles/web/cordis.patch.yml`，数值端口，在所有 bundle 层之后生效）：`cordis.patch.yml` 的 `DSH_CASDOOR_DSH_PORT` 环境通道目前产出字符串端口、被 webserver schema 拒绝（需补 `Number()` 强转，本任务文件清单外，留待修复）；drill 因此不设该环境变量。
+- 退出码 0 且末行 `ALL PASS`＝全部通过；任一步骤失败输出逐项 `❌` 并退出非零。`GET /manifest.webmanifest` 经网关匿名转发被守卫 401 为已知开放问题（见「已知边界」），仅记录不计失败。
+
+### 清理（宿主零残留核验）
+
+drill 已自清子进程与 `$RT`；宿主侧还剩 rehearsal worktree 本体：
+
+```bash
+rm -rf "$RT"   # 幂等，drill 正常结束时已不存在
+git -C "$HOST_REPO/.worktrees/patch-rehearsal-g18" status --porcelain   # patch 的 5 个文件 M，另有运行期写入的 ?? .dsh-multi-tenant/（隔离实例经 cwd 落在宿主 worktree，非 $RT；worktree remove --force 已覆盖其清除）
+git -C "$HOST_REPO/.worktrees/patch-rehearsal-g18" checkout -- .
+git -C "$HOST_REPO" worktree remove --force .worktrees/patch-rehearsal-g18
+git -C "$HOST_REPO" worktree list   # 回到演练前状态（main + dsh-request-guard 两项）
+```
+
+中断恢复：SIGINT/SIGTERM 下 drill 自装处理器（逆序杀子进程组、删 `$RT`、exit 130/143），正常中断即零残留；唯 SIGKILL 等不可捕获信号会留下孤儿网关（30820）与 dsh（38081）并泄漏 `$RT`——重跑时 drill 会对两端口预检并大声报「上次中断残留」。此时按下述恢复：
+
+```bash
+lsof -nP -iTCP:38081 -iTCP:30820 -sTCP:LISTEN   # 应为空；有孤儿则对所列 PID 逐一 kill -TERM（pnpm 外壳若残留，pgrep -fl 'dsh web' 找到后同样清除）
+rm -rf "$RT"   # 泄漏时才存在；重跑前按「搭建」step 2 重新 link
+```
 
 ## 已知边界
 
