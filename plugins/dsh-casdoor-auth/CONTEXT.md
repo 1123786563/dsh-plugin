@@ -8,7 +8,7 @@
 浏览器 HttpOnly cookie（`dsh_sid`）指向的、网关侧 SQLite 持久化的一条已认证记录。生命周期由绝对 TTL 决定；网关重启不掉线。与下面两个"会话"严格区分。
 
 ### DSH Agent 会话 (Agent Session)
-dsh 宿主中一次对话/代理运行的会话实体。在租户体系里，它的归属由**会话归属**决定；stock Web UI 直接创建的会话当前不参与租户归属（见"已知边界"）。
+dsh 宿主中一次对话/代理运行的会话实体。在租户体系里，它的归属由**会话归属**决定；stock Web UI 直接创建的会话自动认领给当前请求主体（#23，见"已知边界"）。
 
 ### 会话归属 (Session Ownership)
 `dsh-multi-tenant` 的 SQLite `session_owners` 表：Agent 会话 ID → {tenantId, userId}，claim-once 不可变。首次认领即锁定；他人 resume 同一会话返回 403。

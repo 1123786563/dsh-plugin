@@ -55,10 +55,21 @@ describe('createSessionFilterHooks', () => {
     }
   })
 
-  function hooks(adminRoles: readonly string[] = ['dsh-admin']): SessionFilterHooksLike {
+  /**
+   * Hooks over the real kernel; `extra` overrides individual deps (the
+   * onSessionCreated cases inject the warn spy or a failing claim through
+   * it), so the kernel wiring is defined in exactly one place.
+   */
+  function hooks(
+    adminRoles: readonly string[] = ['dsh-admin'],
+    extra: Partial<SessionFilterDeps> = {},
+  ): SessionFilterHooksLike {
     const deps: SessionFilterDeps = {
       listSessionsByOwner: p => multiTenant.listSessionsByOwner(p),
       canAccessSession: (p, sessionId) => multiTenant.canAccessSession(p, sessionId),
+      claimSession: (p, sessionId) => multiTenant.claimSession(sessionId, p),
+      warn: () => {},
+      ...extra,
     }
     return createSessionFilterHooks(deps, adminRoles)
   }
@@ -141,24 +152,18 @@ describe('createSessionFilterHooks', () => {
       warn = vi.fn()
     })
 
-    /** Hooks over the real kernel with the creation auto-claim wiring attached. */
+    /** Hooks over the real kernel with the creation auto-claim warn spy attached. */
     function claimingHooks(adminRoles: readonly string[] = ['dsh-admin']): SessionFilterHooksLike {
-      const deps: SessionFilterDeps = {
-        listSessionsByOwner: p => multiTenant.listSessionsByOwner(p),
-        canAccessSession: (p, sessionId) => multiTenant.canAccessSession(p, sessionId),
-        claimSession: (p, sessionId) => multiTenant.claimSession(sessionId, p),
-        warn,
-      }
-      return createSessionFilterHooks(deps, adminRoles)
+      return hooks(adminRoles, { warn })
     }
 
     it('claims a created session to the request principal, visible in the same turn (create contract)', async () => {
-      await multiTenant.claimSession('sb1', bob) // someone else's row the filter must drop
       const hooks = claimingHooks()
       // The host awaits the notifier before the create response settles, so
       // ownership and list visibility hold immediately after this await.
       await hooks.onSessionCreated!(alice, 's-new')
       await expect(multiTenant.getSessionOwner('s-new')).resolves.toEqual({ tenantId: 'acme', userId: 'alice' })
+      // sb1 is bob's row from the CLAIMS fixture — the filter must drop it.
       const rows = [{ sessionId: 'sb1' }, { sessionId: 's-new' }]
       await expect(hooks.listFilter!(alice, rows)).resolves.toEqual([{ sessionId: 's-new' }])
       expect(warn).not.toHaveBeenCalled()
@@ -213,14 +218,8 @@ describe('createSessionFilterHooks', () => {
     })
 
     it('never rethrows a store failure: resolves and warns with session, principal, and cause', async () => {
-      const deps: SessionFilterDeps = {
-        listSessionsByOwner: p => multiTenant.listSessionsByOwner(p),
-        canAccessSession: (p, sessionId) => multiTenant.canAccessSession(p, sessionId),
-        claimSession: vi.fn().mockRejectedValue(new Error('store offline')),
-        warn,
-      }
-      await expect(createSessionFilterHooks(deps, ['dsh-admin']).onSessionCreated!(alice, 's-fail'))
-        .resolves.toBeUndefined()
+      const notifier = hooks(['dsh-admin'], { claimSession: vi.fn().mockRejectedValue(new Error('store offline')), warn }).onSessionCreated!
+      await expect(notifier(alice, 's-fail')).resolves.toBeUndefined()
       expect(warn).toHaveBeenCalledTimes(1)
       expect(warn.mock.calls[0][0]).toContain('s-fail')
       expect(warn.mock.calls[0][0]).toContain('acme')
@@ -300,6 +299,8 @@ describe('applySessionFilter', () => {
   const deps = (): SessionFilterDeps => ({
     listSessionsByOwner: p => multiTenant.listSessionsByOwner(p),
     canAccessSession: (p, sessionId) => multiTenant.canAccessSession(p, sessionId),
+    claimSession: (p, sessionId) => multiTenant.claimSession(sessionId, p),
+    warn: () => {},
   })
 
   it('registers both hooks on the sessionController seat and forwards its disposer', () => {
@@ -325,6 +326,17 @@ describe('applySessionFilter', () => {
     await expect(captured!.listFilter!(alice, rows)).resolves.toEqual([{ sessionId: 'sa1' }])
     await expect(captured!.accessCheck!(alice, 'sb1')).resolves.toBe(false)
     await expect(captured!.accessCheck!(admin, 'sb1')).resolves.toBe(true)
+  })
+
+  it('hands the seat a creation observer whose claim reaches the real ownership kernel', async () => {
+    const register = vi.fn(() => () => {})
+    applySessionFilter({ registerSessionFilter: register }, deps(), ['dsh-admin'])
+    const hooks = register.mock.calls[0][0] as SessionFilterHooksLike
+    expect(typeof hooks.onSessionCreated).toBe('function')
+    await hooks.onSessionCreated!(alice, 's-wired')
+    await expect(multiTenant.getSessionOwner('s-wired')).resolves.toEqual({ tenantId: 'acme', userId: 'alice' })
+    const rows = [{ sessionId: 's-wired' }, { sessionId: 'sb1' }]
+    await expect(hooks.listFilter!(alice, rows)).resolves.toEqual([{ sessionId: 's-wired' }])
   })
 
   it('fails loud when the host core predates the session-filter seat (stale patch)', () => {

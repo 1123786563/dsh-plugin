@@ -16,6 +16,7 @@
 
 - **`ctx.casdoorAuth`**：验证网关转发的 DshIdentityToken（JWKS 验签、iss/aud/算法校验），物化 `{tenantId, userId, displayName, roles}`；
 - **zero-trust 私口守卫**（`guardEnabled`，默认关）：认领宿主 webserver 唯一守卫席位（`registerGuard`），私口上一切 HTTP/WS 升级请求必须携带有效凭证（DshIdentityToken 或 launch-token 自举凭证），否则一律 401 固定文案——无路径白名单，裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)；
+- **会话可见性与创建自动认领**（随 `guardEnabled`，[ADR-0005](./docs/adr/0005-tenant-scoped-session-visibility.md)）：认领宿主 sessionController 唯一 sessionFilter 座位——会话列表/搜索与一切带 sessionId 的方法按多租户归属过滤（特权角色豁免，前端零改动）；stock Web UI 新建/复制（fork）的会话自动认领给当前请求主体（claim-once 幂等；认领失败仅经 `casdoor-auth` logger 告警、绝不回抛，可见性由过滤结构性 fail-closed 兜底）；注册创建观察者同时激活宿主创建准入——`guardEnabled` 下无请求主体的 `session.create`/`session.fork`（含仅持 launch token 的请求）在任何副作用前一律 403；
 - **401 登出监视器**：通过 `webServer.tapIndex` 注入极小脚本进 SPA shell——登录会话中途过期时，首个同源 401 自动跳 `/login`（无 client 半区依赖，覆盖一切插件的 fetch）；
 - **dsh-multi-tenant 装配**：以已验证身份为其 `identity` 接缝供 TenantPrincipal，挂载 `/_dsh-multi-tenant` Web 桥（identity / agents/create / agents/resume），MCP 服务器与 Principal 凭据从插件配置读取（v1：静态，见配置）。
 
@@ -138,7 +139,7 @@ rm -rf "$RT"   # 泄漏时才存在；重跑前按「搭建」step 2 重新 link
 
 ## 已知边界
 
-- **stock Web UI 无租户隔离**（上游 [issue #41](https://github.com/GuoMonth/dsh-multi-tenant/issues/41)）：登录后是共享工作区；租户隔离发生在 Agent 层（会话归属 claim-once + Principal 绑定）。
+- **stock Web UI 的租户隔离依赖宿主 patch**（上游 [issue #41](https://github.com/GuoMonth/dsh-multi-tenant/issues/41)）：`guardEnabled` 开启后，会话列表/准入按会话归属过滤、新建/复制会话自动认领给当前请求主体（#23）；上游 DSH 原生无请求作用域 Principal，守卫与 sessionFilter 钩子由 `scripts/host-patches/deepseek-harness.dsh-request-guard.patch` 提供（patch 依赖与移除条件见 [ADR-0005](./docs/adr/0005-tenant-scoped-session-visibility.md)）。
 - 本机进程直连 `38080` 绕过网关的旁路已由 zero-trust 私口守卫关闭（开启 `guardEnabled` 后，无有效凭证的直连一律 401；逃生门与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)）。
 - `manifest.webmanifest` 与其他静态资产同权，网关匿名转发特例已随 #19 移除：未登录 → 网关自身 401 JSON（登录前 PWA 安装元数据不可得，UI 不受影响）；已登录 → 正常铸造转发 200。按 HTML Standard [Link type "manifest"](https://html.spec.whatwg.org/multipage/links.html#link-type-manifest)，无 `crossorigin` 属性的 manifest link credentials mode 为 "same-origin"（同源登录态会带 cookie），登录后臂即浏览器的真实路径。
 - 特权方法（settings/credentials/agentPreset 等 15 个）在网关层要求 casdoor 角色 `dsh-admin`。

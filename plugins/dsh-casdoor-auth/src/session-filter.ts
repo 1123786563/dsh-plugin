@@ -27,17 +27,18 @@ export interface SessionFilterDeps {
   canAccessSession(principal: { tenantId: string, userId: string }, sessionId: string): Promise<boolean>
   /**
    * Claim one session for the principal — claim-once; a losing claim rejects
-   * (MultiTenantService.claimSession with the principal leading). Provide
-   * together with `warn`; while omitted the creation observer stays inert,
-   * because the index.ts wiring decides whether auto-claim is active.
+   * (MultiTenantService.claimSession with the principal leading). index.ts
+   * wires this to the multi-tenant kernel; it is a required member so an
+   * unwired observer fails to compile instead of silently skipping the
+   * claim.
    */
-  claimSession?(principal: { tenantId: string, userId: string }, sessionId: string): Promise<void>
+  claimSession(principal: { tenantId: string, userId: string }, sessionId: string): Promise<void>
   /**
    * Operable alarm for every auto-claim failure (malformed principal,
    * ownership conflict, store error): the observer resolves without
    * rethrowing, so this channel is the only failure trace.
    */
-  warn?(message: string): void
+  warn(message: string): void
 }
 
 /** Structural mirror of the host's `SessionListFilter` (Item keeps its full type). */
@@ -106,14 +107,13 @@ export function createSessionFilterHooks(
     },
     onSessionCreated: async (principal, sessionId): Promise<void> => {
       if (!isWebRequestPrincipal(principal)) {
-        deps.warn?.(`session-filter auto-claim skipped for session ${sessionId}: request carries no valid web request principal`)
+        deps.warn(`session-filter auto-claim skipped for session ${sessionId}: request carries no valid web request principal`)
         return
       }
-      if (deps.claimSession === undefined) return // inert observer: see SessionFilterDeps.claimSession
       try {
         await deps.claimSession(principal, sessionId)
       } catch (error) {
-        deps.warn?.(`session-filter auto-claim failed for session ${sessionId} (principal ${principal.tenantId}/${principal.userId}): ${errorText(error)}`)
+        deps.warn(`session-filter auto-claim failed for session ${sessionId} (principal ${principal.tenantId}/${principal.userId}): ${errorText(error)}`)
       }
     },
   }
