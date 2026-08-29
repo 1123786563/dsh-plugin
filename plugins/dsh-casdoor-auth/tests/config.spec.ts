@@ -17,6 +17,11 @@ describe('resolveConfig', () => {
     const config = resolveConfig({ gatewayJwksUrl: 'http://10.0.0.9:3080/.well-known/jwks.json' })
     expect(config.gatewayJwksUrl).toBe('http://10.0.0.9:3080/.well-known/jwks.json')
   })
+
+  it('defaults guardEnabled to false and reads the operator override', () => {
+    expect(resolveConfig(undefined).guardEnabled).toBe(false)
+    expect(resolveConfig({ guardEnabled: true }).guardEnabled).toBe(true)
+  })
 })
 
 const base: Config = resolveConfig({

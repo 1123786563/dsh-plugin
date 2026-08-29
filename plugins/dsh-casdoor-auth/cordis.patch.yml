@@ -29,3 +29,9 @@
         # empty keeps the remote-JWKS behavior.
         identityPublicKey: !!js process.env.DSH_CASDOOR_IDENTITY_PUBLIC_KEY ?? ''
         identityHeader: !!js process.env.DSH_CASDOOR_IDENTITY_HEADER ?? 'x-dsh-identity'
+        # Zero-trust guard switch: only '1' or 'true' enables; unset or any
+        # other value keeps the pre-gate behavior (escape hatch, default off).
+        guardEnabled: !!js process.env.DSH_CASDOOR_GUARD === '1' || process.env.DSH_CASDOOR_GUARD === 'true'
+        # Gateway data dir the launch token is published into (0600) for the
+        # gateway's UpstreamAuth exchange.
+        gatewayDataDir: !!js process.env.DSH_CASDOOR_GATEWAY_DATA_DIR ?? '~/.dsh-casdoor-gateway'

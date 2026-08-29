@@ -15,6 +15,7 @@
 ## 职责
 
 - **`ctx.casdoorAuth`**：验证网关转发的 DshIdentityToken（JWKS 验签、iss/aud/算法校验），物化 `{tenantId, userId, displayName, roles}`；
+- **zero-trust 私口守卫**（`guardEnabled`，默认关）：认领宿主 webserver 唯一守卫席位（`registerGuard`），私口上一切 HTTP/WS 升级请求必须携带有效凭证（DshIdentityToken 或 launch-token 自举凭证），否则一律 401 固定文案——无路径白名单，裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)；
 - **401 登出监视器**：通过 `webServer.tapIndex` 注入极小脚本进 SPA shell——登录会话中途过期时，首个同源 401 自动跳 `/login`（无 client 半区依赖，覆盖一切插件的 fetch）；
 - **dsh-multi-tenant 装配**：以已验证身份为其 `identity` 接缝供 TenantPrincipal，挂载 `/_dsh-multi-tenant` Web 桥（identity / agents/create / agents/resume），MCP 服务器与 Principal 凭据从插件配置读取（v1：静态，见配置）。
 
@@ -51,19 +52,95 @@ pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
 | `basePath` | `/_dsh-multi-tenant` | Web 桥挂载路径 |
 | `mcpServers` / `mcpServersByTenant` | `[]` / `{}` | 租户 MCP 服务器（stdio/streamable-http），per-tenant 覆盖全局 |
 | `credentials` | `{}` | Principal 静态凭据（name→secret），MCP 凭据绑定解析用 |
+| `gatewayDataDir` | `~/.dsh-casdoor-gateway`（env `DSH_CASDOOR_GATEWAY_DATA_DIR`） | 网关数据目录：插件把本进程 webserver launch token 以 0600 写入其中（`webserver-token.json`），网关 UpstreamAuth 读取它铸造 dsh 浏览器认证 cookie |
+| `guardEnabled` | `false`（env `DSH_CASDOOR_GUARD`，`1`/`true` 开、其余关） | zero-trust 私口守卫开关（逃生门：默认关＝门禁前行为零差异）；开则认领宿主唯一守卫席位，无有效 DshIdentityToken / launch token 的一切 HTTP/WS 请求 401 固定文案，宿主需已应用 dsh-request-guard patch（缺失则激活大声失败），语义与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md) |
 
-端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`。
+端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`；演练（rehearsal drill）另起隔离私口 `38081` 的第二实例，不占用正式 `38080`（该环境通道现产出字符串端口，drill 改走 profile patch 数值端口，全流程见[演练手册](#演练手册zero-trust-私口守卫-rehearsal-drill)）。
+
+## 演练手册（zero-trust 私口守卫 rehearsal drill）
+
+[`scripts/zero-trust-drill.mjs`](./scripts/zero-trust-drill.mjs) 对**隔离实例**复演守卫全行为：直连负路径矩阵（12 条 HTTP 路径/方法全 401 固定文案、WS 直连无 101 被拆、自铸攻击 token 四臂）、经网关正向五步（真实 casdoor 登录 / index / JS 资产 / RPC / WS 101）、fail-closed（短 TTL token 随网关死亡失效、矩阵复跑、重启后会话不掉线）、逃生门三步。脚本自起网关与 dsh 子进程、用后自清；全程只碰 `38081`/`30820`/`8001`，不触碰宿主 3080 live 实例与 `38080` 正式私口。
+
+### 前置
+
+```bash
+# 本 worktree 内构建网关（drill 以 node 直跑 services/casdoor-gateway/lib/server.js，只读复用）
+pnpm --filter dsh-casdoor-gateway build
+
+# 主仓起 casdoor（幂等；种子数据：acme/alice 等）
+cd /Users/wuyongjun/trea/dsh-plugin && docker compose up -d casdoor postgres
+```
+
+### 搭建宿主 rehearsal worktree（只读基线 + patch，不 commit）
+
+宿主核心需带守卫席位（ADR-0004 的 dsh-request-guard patch）。以变量代路径：`HOST_REPO`＝宿主 deepseek-harness 检出，`PLUGIN_WT`＝本 worktree：
+
+```bash
+HOST_REPO=/Users/wuyongjun/trea/deepseek-harness
+PLUGIN_WT=/Users/wuyongjun/trea/dsh-plugin/.worktrees/gate-v2-18
+
+# 1. detached 基线 worktree + 应用守卫 patch（5 文件改动，留在工作区不 commit）
+git -C "$HOST_REPO" worktree add --detach .worktrees/patch-rehearsal-g18 cd5ef8148158c3a752a658978873241fdf8e2bbc
+bash "$PLUGIN_WT/scripts/host-patches/apply.sh" --repo "$HOST_REPO/.worktrees/patch-rehearsal-g18"
+cd "$HOST_REPO/.worktrees/patch-rehearsal-g18"
+pnpm install --frozen-lockfile
+pnpm run build        # 全量构建：web profile 启动需要全部 client bundle（仅 build:web 会在 boot 报 MissingClientBundleError）
+
+# 2. 构建插件并 link 进隔离 profile（DSH_HOME 在 $RT 内；与正式 ~/.dsh 完全隔离）
+cd "$PLUGIN_WT" && pnpm install
+pnpm --filter dsh-casdoor-auth build
+pnpm --filter dsh-multi-tenant... build
+RT=$(mktemp -d /tmp/zero-trust-g18-XXXX)
+DSH_HOME=$RT/dsh-home pnpm -C "$HOST_REPO/.worktrees/patch-rehearsal-g18" dsh \
+  plugin --profile web add link:$PLUGIN_WT/plugins/dsh-casdoor-auth
+DSH_HOME=$RT/dsh-home pnpm -C "$HOST_REPO/.worktrees/patch-rehearsal-g18" dsh \
+  plugin --profile web add link:$PLUGIN_WT/plugins/dsh-multi-tenant/packages/multi-tenant
+```
+
+### 运行 drill
+
+```bash
+cd "$PLUGIN_WT"
+node plugins/dsh-casdoor-auth/scripts/zero-trust-drill.mjs \
+  --host-worktree "$HOST_REPO/.worktrees/patch-rehearsal-g18" \
+  --rt "$RT"
+```
+
+- `--rt` **必须**与上面 link 插件时的 `$RT` 同一目录（隔离 web profile 落在 `$RT/dsh-home`，脚本不重建它）。
+- drill 自起网关（`GATEWAY_IDENTITY_TTL_SEC=5` 压缩 fail-closed 等待）与 dsh 第二实例（`pnpm dsh web --no-open`，`DSH_CASDOOR_GUARD=1` + 钉公钥），结束自动杀尽子进程并 `rm -rf $RT`。
+- 私口 38081 由 drill 写入 profile 用户 patch 层（`$RT/dsh-home/profiles/web/cordis.patch.yml`，数值端口，在所有 bundle 层之后生效）：`cordis.patch.yml` 的 `DSH_CASDOOR_DSH_PORT` 环境通道目前产出字符串端口、被 webserver schema 拒绝（需补 `Number()` 强转，本任务文件清单外，留待修复）；drill 因此不设该环境变量。
+- 退出码 0 且末行 `ALL PASS`＝全部通过；任一步骤失败输出逐项 `❌` 并退出非零。`GET /manifest.webmanifest` 经网关匿名转发被守卫 401 为已知开放问题（见「已知边界」），仅记录不计失败。
+
+### 清理（宿主零残留核验）
+
+drill 已自清子进程与 `$RT`；宿主侧还剩 rehearsal worktree 本体：
+
+```bash
+rm -rf "$RT"   # 幂等，drill 正常结束时已不存在
+git -C "$HOST_REPO/.worktrees/patch-rehearsal-g18" status --porcelain   # patch 的 5 个文件 M，另有运行期写入的 ?? .dsh-multi-tenant/（隔离实例经 cwd 落在宿主 worktree，非 $RT；worktree remove --force 已覆盖其清除）
+git -C "$HOST_REPO/.worktrees/patch-rehearsal-g18" checkout -- .
+git -C "$HOST_REPO" worktree remove --force .worktrees/patch-rehearsal-g18
+git -C "$HOST_REPO" worktree list   # 回到演练前状态（main + dsh-request-guard 两项）
+```
+
+中断恢复：SIGINT/SIGTERM 下 drill 自装处理器（逆序杀子进程组、删 `$RT`、exit 130/143），正常中断即零残留；唯 SIGKILL 等不可捕获信号会留下孤儿网关（30820）与 dsh（38081）并泄漏 `$RT`——重跑时 drill 会对两端口预检并大声报「上次中断残留」。此时按下述恢复：
+
+```bash
+lsof -nP -iTCP:38081 -iTCP:30820 -sTCP:LISTEN   # 应为空；有孤儿则对所列 PID 逐一 kill -TERM（pnpm 外壳若残留，pgrep -fl 'dsh web' 找到后同样清除）
+rm -rf "$RT"   # 泄漏时才存在；重跑前按「搭建」step 2 重新 link
+```
 
 ## 已知边界
 
 - **stock Web UI 无租户隔离**（上游 [issue #41](https://github.com/GuoMonth/dsh-multi-tenant/issues/41)）：登录后是共享工作区；租户隔离发生在 Agent 层（会话归属 claim-once + Principal 绑定）。
-- 本机进程可直连 `38080` 绕过网关（loopback 内信任边界）。
+- 本机进程直连 `38080` 绕过网关的旁路已由 zero-trust 私口守卫关闭（开启 `guardEnabled` 后，无有效凭证的直连一律 401；逃生门与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)）。
+- `manifest.webmanifest` 经网关匿名转发会被守卫 401：PWA 安装元数据失效，UI 不受影响（浏览器按规范拉取 manifest 不带 cookie，即使登录态亦然）；取消网关侧匿名转发特例属 #19 正文领地（开放问题）。
 - 特权方法（settings/credentials/agentPreset 等 15 个）在网关层要求 casdoor 角色 `dsh-admin`。
 
 ## 文档
 
 - 领域术语表：[CONTEXT.md](./CONTEXT.md)
-- 架构决策：[docs/adr/0001](./docs/adr/0001-standalone-gateway-form.md)（独立网关形态）、[0002](./docs/adr/0002-gateway-signed-identity-jwt.md)（JWT 身份传递与特权门禁）、[0003](./docs/adr/0003-fastify-openid-client-stack.md)（网关技术栈与请求体缓冲）
+- 架构决策：[docs/adr/0001](./docs/adr/0001-standalone-gateway-form.md)（独立网关形态）、[0002](./docs/adr/0002-gateway-signed-identity-jwt.md)（JWT 身份传递与特权门禁）、[0003](./docs/adr/0003-fastify-openid-client-stack.md)（网关技术栈与请求体缓冲）、[0006](./docs/adr/0006-zero-trust-private-port-guard.md)（zero-trust 私口守卫：钩子语义、准入裁定与定名）
 
 ## 开发
 

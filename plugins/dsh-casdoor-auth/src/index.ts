@@ -6,6 +6,9 @@
  *
  *  - ctx.casdoorAuth verifies the per-request DshIdentityToken (Ed25519 JWT
  *    against the gateway's JWKS) into a canonical CasdoorIdentity;
+ *  - guardEnabled claims the host webserver's guard seat into a zero-trust
+ *    private-port gate: every request without a valid DshIdentityToken (or
+ *    the launch-token bootstrap credential) is vetoed 401 (ADR-0006);
  *  - the SPA shell gets the 401 login-redirect watcher injected through
  *    webServer.tapIndex;
  *  - the dsh-multi-tenant MCP SaaS runtime assembles on top: its web bridge
@@ -34,6 +37,7 @@ import {
 } from 'dsh-multi-tenant'
 import { Config, mcpServersFor, resolveConfig } from './config.ts'
 import type { Config as ConfigShape } from './config.ts'
+import { applyGuard } from './guard.ts'
 import { IdentityVerifier, type CasdoorIdentity } from './identity.ts'
 import { inject401Watcher, WATCHER_SCRIPT } from './watcher.ts'
 
@@ -93,6 +97,13 @@ function expandHome(path: string): string {
 
 export { Config }
 export type { ConfigShape }
+export { GUARD_HINT, applyGuard, createCasdoorRequestGuard } from './guard.ts'
+export type {
+  WebRequestGuard,
+  WebRequestGuardDecision,
+  WebRequestGuardSeat,
+  WebRequestPrincipal,
+} from './guard.ts'
 export { IdentityVerifier }
 export type { CasdoorIdentity }
 export { inject401Watcher, WATCHER_SCRIPT }
@@ -100,8 +111,9 @@ export { mcpServersFor, resolveConfig }
 
 /**
  * Activate the plugin: resolve configuration, provide ctx.casdoorAuth, inject
- * the 401 watcher into the SPA shell, and (on the web profile, with the
- * dsh-multi-tenant services present) assemble the MCP SaaS bridge.
+ * the 401 watcher into the SPA shell, claim the host's guard seat when
+ * guardEnabled, and (on the web profile, with the dsh-multi-tenant services
+ * present) assemble the MCP SaaS bridge.
  * @param ctx - host context.
  * @param config - loader-supplied entry config.
  */
@@ -109,11 +121,26 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
   const entry = resolveConfig(config)
   const service = new CasdoorAuthService(ctx, entry)
 
+  // The per-process launch token, recorded whether or not the connection
+  // service exposes one: the guard reads the holder at decision time, so the
+  // unbounded boot order between webServer and connection cannot wedge the
+  // comparison.
+  const launchToken: { current: string | undefined } = { current: undefined }
+
   // 401 watcher: injected server-side into every rendered index.html, so a
   // mid-session expiry becomes a login redirect without any client-half
   // service dependency (works on every plugin's fetches too).
+  //
+  // Zero-trust private-port guard (default off): claim the host webserver's
+  // single guard seat and admit only credentialed requests. Requires a core
+  // carrying scripts/host-patches/deepseek-harness.dsh-request-guard.patch —
+  // applyGuard fails loud when the seat is missing.
   ctx.inject(['webServer'], scoped => {
     scoped.effect(() => scoped.webServer.tapIndex(inject401Watcher), 'casdoor-auth: 401 watcher')
+    if (entry.guardEnabled) {
+      const releaseGuard = applyGuard(scoped.webServer, entry, service, () => launchToken.current)
+      scoped.effect(() => releaseGuard, 'casdoor-auth: zero-trust private-port guard')
+    }
   })
 
   // dsh >= 0.1.2-alpha browser auth: the webserver authenticates every
@@ -126,7 +153,8 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
     const connection = scoped.get('connection') as Partial<ConnectionService> | undefined
     if (connection === undefined || typeof connection.authenticatedUrl !== 'function') return
     const token = new URL(connection.authenticatedUrl('http://127.0.0.1/')).searchParams.get('token')
-    if (token === null || token === '') {
+    launchToken.current = token !== null && token !== '' ? token : undefined
+    if (launchToken.current === undefined) {
       scoped.logger('casdoor-auth').warn(
         'connection service exposed no launch token; gateway login cannot satisfy dsh web browser auth',
       )
@@ -135,7 +163,7 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
     const file = join(expandHome(entry.gatewayDataDir), 'webserver-token.json')
     try {
       mkdirSync(dirname(file), { recursive: true })
-      writeFileSync(file, `${JSON.stringify({ token, updatedAt: Date.now() })}\n`, { mode: 0o600 })
+      writeFileSync(file, `${JSON.stringify({ token: launchToken.current, updatedAt: Date.now() })}\n`, { mode: 0o600 })
     } catch (error) {
       scoped.logger('casdoor-auth').warn(
         error instanceof Error ? error : new Error(String(error)),
