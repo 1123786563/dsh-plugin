@@ -55,6 +55,7 @@
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^24.13.3",
     "dsh-multi-tenant": "link:../dsh-multi-tenant/packages/multi-tenant",
+    "js-yaml": "4.2.0",
     "tsdown": "0.22.2",
     "typescript": "^5.5.0",
     "vitest": "^4.1.8"

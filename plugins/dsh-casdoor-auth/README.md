@@ -50,12 +50,13 @@ pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
 | `identityHeader` | `x-dsh-identity` | DshIdentityToken 携带头 |
 | `issuer` / `audience` | `dsh-casdoor-gateway` / `dsh-casdoor-auth` | 令牌校验目标 |
 | `basePath` | `/_dsh-multi-tenant` | Web 桥挂载路径 |
+| `controlPage` | `true` | 是否在 `basePath` 提供网桥控制页（身份/准入状态页） |
 | `mcpServers` / `mcpServersByTenant` | `[]` / `{}` | 租户 MCP 服务器（stdio/streamable-http），per-tenant 覆盖全局 |
 | `credentials` | `{}` | Principal 静态凭据（name→secret），MCP 凭据绑定解析用 |
 | `gatewayDataDir` | `~/.dsh-casdoor-gateway`（env `DSH_CASDOOR_GATEWAY_DATA_DIR`） | 网关数据目录：插件把本进程 webserver launch token 以 0600 写入其中（`webserver-token.json`），网关 UpstreamAuth 读取它铸造 dsh 浏览器认证 cookie |
 | `guardEnabled` | `false`（env `DSH_CASDOOR_GUARD`，`1`/`true` 开、其余关） | zero-trust 私口守卫开关（逃生门：默认关＝门禁前行为零差异）；开则认领宿主唯一守卫席位，无有效 DshIdentityToken / launch token 的一切 HTTP/WS 请求 401 固定文案，宿主需已应用 dsh-request-guard patch（缺失则激活大声失败），语义与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md) |
 
-端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`；演练（rehearsal drill）另起隔离私口 `38081` 的第二实例，不占用正式 `38080`（该环境通道现产出字符串端口，drill 改走 profile patch 数值端口，全流程见[演练手册](#演练手册zero-trust-私口守卫-rehearsal-drill)）。
+端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，值经 `Number()` 强转：空串视同未设回落 `38080`，非数值得 `NaN` 由 webserver schema 大声拒绝；改口需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`；演练（rehearsal drill）另起隔离私口 `38081` 的第二实例，不占用正式 `38080`（全流程见[演练手册](#演练手册zero-trust-私口守卫-rehearsal-drill)）。
 
 ## 演练手册（zero-trust 私口守卫 rehearsal drill）
 
@@ -77,7 +78,7 @@ cd /Users/wuyongjun/trea/dsh-plugin && docker compose up -d casdoor postgres
 
 ```bash
 HOST_REPO=/Users/wuyongjun/trea/deepseek-harness
-PLUGIN_WT=/Users/wuyongjun/trea/dsh-plugin/.worktrees/gate-v2-18
+PLUGIN_WT=/Users/wuyongjun/trea/dsh-plugin/.worktrees/port-num-41
 
 # 1. detached 基线 worktree + 应用守卫 patch（5 文件改动，留在工作区不 commit）
 git -C "$HOST_REPO" worktree add --detach .worktrees/patch-rehearsal-g18 cd5ef8148158c3a752a658978873241fdf8e2bbc
@@ -89,7 +90,9 @@ pnpm run build        # 全量构建：web profile 启动需要全部 client bun
 # 2. 构建插件并 link 进隔离 profile（DSH_HOME 在 $RT 内；与正式 ~/.dsh 完全隔离）
 cd "$PLUGIN_WT" && pnpm install
 pnpm --filter dsh-casdoor-auth build
-pnpm --filter dsh-multi-tenant... build
+# dsh-multi-tenant 是嵌套 pnpm workspace，其包对根过滤器不可见，须在其内安装并构建
+pnpm -C plugins/dsh-multi-tenant install
+pnpm -C plugins/dsh-multi-tenant build
 RT=$(mktemp -d /tmp/zero-trust-g18-XXXX)
 DSH_HOME=$RT/dsh-home pnpm -C "$HOST_REPO/.worktrees/patch-rehearsal-g18" dsh \
   plugin --profile web add link:$PLUGIN_WT/plugins/dsh-casdoor-auth
@@ -108,7 +111,7 @@ node plugins/dsh-casdoor-auth/scripts/zero-trust-drill.mjs \
 
 - `--rt` **必须**与上面 link 插件时的 `$RT` 同一目录（隔离 web profile 落在 `$RT/dsh-home`，脚本不重建它）。
 - drill 自起网关（`GATEWAY_IDENTITY_TTL_SEC=5` 压缩 fail-closed 等待）与 dsh 第二实例（`pnpm dsh web --no-open`，`DSH_CASDOOR_GUARD=1` + 钉公钥），结束自动杀尽子进程并 `rm -rf $RT`。
-- 私口 38081 由 drill 写入 profile 用户 patch 层（`$RT/dsh-home/profiles/web/cordis.patch.yml`，数值端口，在所有 bundle 层之后生效）：`cordis.patch.yml` 的 `DSH_CASDOOR_DSH_PORT` 环境通道目前产出字符串端口、被 webserver schema 拒绝（需补 `Number()` 强转，本任务文件清单外，留待修复）；drill 因此不设该环境变量。
+- 私口 38081 经 `DSH_CASDOOR_DSH_PORT` 环境通道注入（`cordis.patch.yml` 已作 `Number()` 强转，env 字符串端口不再被 webserver schema 拒绝）；drill 不写 profile 用户 patch 层，隔离与清理契约不变。
 - 退出码 0 且末行 `ALL PASS`＝全部通过；任一步骤失败输出逐项 `❌` 并退出非零。`GET /manifest.webmanifest` 经网关匿名转发被守卫 401 为已知开放问题（见「已知边界」），仅记录不计失败。
 
 ### 清理（宿主零残留核验）
@@ -134,7 +137,7 @@ rm -rf "$RT"   # 泄漏时才存在；重跑前按「搭建」step 2 重新 link
 
 - **stock Web UI 无租户隔离**（上游 [issue #41](https://github.com/GuoMonth/dsh-multi-tenant/issues/41)）：登录后是共享工作区；租户隔离发生在 Agent 层（会话归属 claim-once + Principal 绑定）。
 - 本机进程直连 `38080` 绕过网关的旁路已由 zero-trust 私口守卫关闭（开启 `guardEnabled` 后，无有效凭证的直连一律 401；逃生门与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)）。
-- `manifest.webmanifest` 经网关匿名转发会被守卫 401：PWA 安装元数据失效，UI 不受影响（浏览器按规范拉取 manifest 不带 cookie，即使登录态亦然）；取消网关侧匿名转发特例属 #19 正文领地（开放问题）。
+- 未登录/无会话 cookie 时，`manifest.webmanifest` 经网关匿名转发（`isCredentiallessAsset` 特例）被守卫 401：PWA 安装元数据对该场景失效，UI 不受影响。按 HTML Standard [Link type "manifest"](https://html.spec.whatwg.org/multipage/links.html#link-type-manifest)，无 `crossorigin` 属性的 manifest link credentials mode 为 "same-origin"（同源登录态会带 cookie），此时走网关正常铸造转发而非匿名特例（登录态路径未验证）；取消网关侧匿名转发特例属 #19 正文领地（开放问题）。
 - 特权方法（settings/credentials/agentPreset 等 15 个）在网关层要求 casdoor 角色 `dsh-admin`。
 
 ## 文档
