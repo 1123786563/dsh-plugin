@@ -1,16 +1,107 @@
+diff --git a/packages/api/gateway/README.i18n.yaml b/packages/api/gateway/README.i18n.yaml
+index f1d957d143..7da6856375 100644
+--- a/packages/api/gateway/README.i18n.yaml
++++ b/packages/api/gateway/README.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write packages/api/gateway/README.md
+-README.md: d10eed46d5534a2459995bd687942d799f009c7b
+-README.zh.md: 310b44cfe633758089771cda4040679c09373ec2
++README.md: 2567617e736bc5a59d68ffd7c5b2c60de20de55a
++README.zh.md: 5fb0a9ae500bc49de8efc935595db4cd5ce5b0c3
+diff --git a/packages/api/gateway/README.md b/packages/api/gateway/README.md
+index d10eed46d5..2567617e73 100644
+--- a/packages/api/gateway/README.md
++++ b/packages/api/gateway/README.md
+@@ -34,7 +34,11 @@ A cancellation-aware Remote method declares `signal: AbortSignal` as its final H
+ 
+ A stream Remote uses `@Remote({ mode: 'stream' })` and returns an `Iterable` or `AsyncIterable`. `ctx.typertGateway.stream()` applies the same endpoint, argument, lookup, and cancellation checks as unary invocation, then validates each yielded item with the generated result codec. The Client opens the Gateway-owned `/api/remote.mux` WebSocket when its plugin activates, keeps it connected while idle, and retries physical connection failures with capped backoff. The Host sends Ping control frames at the configured `websocketHeartbeatIntervalMs` interval (30 seconds by default), and the browser answers Pong at the WebSocket protocol layer, so idle network intermediaries see traffic without any Remote stream frame. Independently cancellable logical streams share that socket; an in-process Connection carrier provides equivalent streams directly without opening it.
+ 
+-Host composition can register one application event source through `registerRemoteEvents()`. Gateway reserves the internal `$events` logical endpoint for that source, accepts only empty `args`, and aborts streams opened by the registration when the source is withdrawn. API Remotes owns the event selection, argument validation, per-Client queues, and the Host home sent in the opening `{ type: 'ready', clientId, host: { home } }` frame. Its source factory attaches incremental listeners synchronously, so the Client publishes the generation and starts baseline reads only after incremental delivery is ready.
++Host composition can register one application event source through `registerRemoteEvents()`. Gateway reserves the internal `$events` logical endpoint for that source, accepts only empty `args`, and aborts streams opened by the registration when the source is withdrawn. API Remotes owns the event selection, argument validation, per-Client queues, and the Host home sent in the opening `{ type: 'ready', clientId, host: { home } }` frame. Its source factory attaches incremental listeners synchronously, so the Client publishes the generation and starts baseline reads only after incremental delivery is ready. The registration may carry `sessionReferenceOf`, one extractor per event name classifying emitted notifications by Session reference.
++
++Host composition can also claim one per-connection frame-filter seat through `registerRemoteEventFrameFilter()`. When a Client generation opens its `$events` stream, the Gateway calls the factory once inside that connection's request-principal continuation and stores the returned filter on the generation; broadcast paths run outside any connection's request context, so every later judgment uses that open-time snapshot, and carriers without a guard principal build their filter from undefined. The filter is synchronous, `(sessionId, frameType) => boolean`, with the original Host event name as frameType. A second registration throws because two filters cannot compose, and the disposer leaves later generations unfiltered.
++
++Judgment classifies frames by Session reference. Waterfall frames are always session-referenced (sessionId from the frame's `agentId`), and a denied frame is neither queued nor recorded as a delivery, so that Client can never settle the waterfall or observe its cancellation. Emit frames are judged only when the registration supplied a `sessionReferenceOf` extractor for the event and the extractor returns a Session id; events without an extractor or without a reference are state frames and pass unchanged. The `ready` and `cancel` protocol frames are never judged. A filter that throws drops that one frame for that Client with a warning and never interrupts the broadcast loop or the stream. With neither a filter nor extractors registered, forwarded events are delivered exactly as before.
+ 
+ <a id="client-service-clientremote-ctx-key-remote"></a>
+ ## Client service: `ClientRemote` (ctx key: `remote`)
+diff --git a/packages/api/gateway/README.zh.md b/packages/api/gateway/README.zh.md
+index 310b44cfe6..5fb0a9ae50 100644
+--- a/packages/api/gateway/README.zh.md
++++ b/packages/api/gateway/README.zh.md
+@@ -34,7 +34,11 @@ Connection 可用时，Host 入口会在 Connection 共享的 `/api` FetchHandle
+ 
+ 流式 Remote 使用 `@Remote({ mode: 'stream' })` 并返回 `Iterable` 或 `AsyncIterable`。`ctx.typertGateway.stream()` 执行与一元调用相同的 endpoint、参数、lookup 和取消校验，再用生成的 result codec 校验每个产出项。Client 插件激活时打开 Gateway 自有的 `/api/remote.mux` WebSocket，使其在空闲时保持连接，并以有上限的退避重试物理连接失败。Host 按配置的 `websocketHeartbeatIntervalMs` 间隔（默认 30 秒）发送 Ping 控制帧，浏览器在 WebSocket 协议层自动回复 Pong，使空闲网络中间层持续看到流量，而不新增 Remote stream frame。可独立取消的逻辑流共享这条连接；进程内 Connection 载体直接提供等价的流，不打开该 WebSocket。
+ 
+-Host 组合可通过 `registerRemoteEvents()` 注册唯一的应用事件 source。Gateway 为它保留内部 `$events` logical endpoint，只接受空 `args`，并在 source 撤回时中止该注册打开的 stream。事件名单、参数校验、每 Client 队列及 opening `{ type: 'ready', clientId, host: { home } }` frame 中的 Host home 由 API Remotes 拥有。source factory 在返回 iterable 前同步挂好增量 listener，因此 Client 只在增量投递就绪后发布 generation 并开始 baseline 读取。
++Host 组合可通过 `registerRemoteEvents()` 注册唯一的应用事件 source。Gateway 为它保留内部 `$events` logical endpoint，只接受空 `args`，并在 source 撤回时中止该注册打开的 stream。事件名单、参数校验、每 Client 队列及 opening `{ type: 'ready', clientId, host: { home } }` frame 中的 Host home 由 API Remotes 拥有。source factory 在返回 iterable 前同步挂好增量 listener，因此 Client 只在增量投递就绪后发布 generation 并开始 baseline 读取。注册可携带 `sessionReferenceOf`，按事件名为被 emit 的通知声明 Session 引用提取器。
++
++Host 组合还可通过 `registerRemoteEventFrameFilter()` 认领唯一的每连接帧过滤席位。Client generation 打开 `$events` stream 时，Gateway 在该连接的 request-principal continuation 内调用 factory 一次，并把返回的过滤器存在该 generation 上；广播路径运行在任何连接的请求上下文之外，因此后续判定一律使用这个建立时的快照，无 guard principal 的载体以 undefined 构建过滤器。过滤器为同步的 `(sessionId, frameType) => boolean`，frameType 取原始 Host 事件名。第二次注册会 throw，因为两个过滤器无法组合；disposer 释放后新 generation 不再过滤。
++
++判定按 Session 引用分类帧。waterfall 帧恒为会话引用（sessionId 取帧的 `agentId`），被拒绝的帧既不入队也不记录为 delivery，因此该 Client 永远无法结算该 waterfall 或观察其 cancel 帧。emit 帧仅当注册为该事件提供了 `sessionReferenceOf` 提取器且提取出 Session id 时才判定；无提取器或无引用的事件是状态帧，原样放行。`ready` 与 `cancel` 协议帧永不判定。过滤器 throw 时仅为该 Client 丢弃该帧并告警，绝不打断广播循环或 stream。未注册过滤器与提取器时，转发事件的投递与之前完全一致。
+ 
+ <a id="client-service-clientremote-ctx-key-remote"></a>
+ ## Client 服务：`ClientRemote`（ctx key：`remote`）
 diff --git a/packages/api/gateway/src/index.ts b/packages/api/gateway/src/index.ts
-index 1d754b05a7..04a4db288c 100644
+index 1d754b05a7..1c45f16fcc 100644
 --- a/packages/api/gateway/src/index.ts
 +++ b/packages/api/gateway/src/index.ts
 @@ -8,6 +8,7 @@
  import { randomUUID } from 'node:crypto'
  import { Context, Service, symbols } from '@deepseek-ai/cordis'
  import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
-+import { runWithRequestPrincipal } from '@deepseek-ai/dsh-host-webserver'
++import { currentRequestPrincipal, runWithRequestPrincipal } from '@deepseek-ai/dsh-host-webserver'
  import type { WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
  import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
  import z from '@deepseek-ai/schemastery'
-@@ -221,7 +222,13 @@ export class TypertGatewayService extends Service implements TypertGateway {
+@@ -22,6 +23,10 @@ import {
+ } from '@deepseek-ai/dsh-typert-protocol'
+ import type {
+   InvokeRemoteRequest,
++  RemoteEventFrameFilter,
++  RemoteEventFrameFilterFactory,
++  RemoteEventRegistrationOptions,
++  RemoteEventSessionReference,
+   TypertGateway,
+   TypertGatewayErrorCode,
+   TypertGatewayWireStream,
+@@ -57,6 +62,10 @@ import {
+ 
+ export type {
+   InvokeRemoteRequest,
++  RemoteEventFrameFilter,
++  RemoteEventFrameFilterFactory,
++  RemoteEventRegistrationOptions,
++  RemoteEventSessionReference,
+   TypertGateway,
+   TypertGatewayErrorCode,
+   TypertGatewayWireStream,
+@@ -91,12 +100,14 @@ interface RegisteredRemoteEventSource {
+   readonly lifetime: AbortController
+   readonly done: Promise<void>
+   readonly host: RemoteEventHostInfo
++  readonly sessionReferenceOf: Readonly<Record<string, RemoteEventSessionReference>> | undefined
+ }
+ 
+ interface RemoteEventClient {
+   readonly id: RemoteEventClientId
+   readonly queue: RemoteEventQueue
+   readonly deliveries: Map<RemoteEventId, PendingRemoteEvent>
++  readonly frameFilter: RemoteEventFrameFilter | undefined
+ }
+ 
+ interface PendingRemoteEvent {
+@@ -185,6 +196,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
+ 
+   private srcClaims: ReadonlySet<string> | undefined
+   private remoteEvents: RegisteredRemoteEventSource | undefined
++  private eventFrameFilter: RemoteEventFrameFilterFactory | undefined
+   private readonly remoteEventClients = new Map<RemoteEventClientId, RemoteEventClient>()
+   private readonly pendingRemoteEvents = new Map<RemoteEventId, PendingRemoteEvent>()
+ 
+@@ -221,7 +233,13 @@ export class TypertGatewayService extends Service implements TypertGateway {
                rejectRemoteStreamUpgrade(socket, rejection)
                return
              }
@@ -25,6 +116,128 @@ index 1d754b05a7..04a4db288c 100644
            },
          }
          const unregister = webCtx.webServer.registerUpgrade(route)
+@@ -237,11 +255,13 @@ export class TypertGatewayService extends Service implements TypertGateway {
+    * Register the sole application-selected forwarded-event source.
+    * @param source - stream factory installed by the Remote assembly.
+    * @param host - stable Host facts included in each Client generation's opening frame.
++   * @param options - optional registration facts, currently the Session-reference extractors classifying emit events.
+    * @returns disposer removing this source and cancelling its active streams.
+    */
+   registerRemoteEvents(
+     source: TypertRemoteEventSource,
+     host: RemoteEventHostInfo,
++    options?: RemoteEventRegistrationOptions,
+   ): () => Promise<void> {
+     if (this.remoteEvents !== undefined) {
+       throw new Error('typert gateway: forwarded Remote event source is already registered')
+@@ -254,7 +274,12 @@ export class TypertGatewayService extends Service implements TypertGateway {
+       this.remoteEvents = undefined
+       lifetime.abort(error)
+     })
+-    const registration: RegisteredRemoteEventSource = { lifetime, done, host: { home: host.home } }
++    const registration: RegisteredRemoteEventSource = {
++      lifetime,
++      done,
++      host: { home: host.home },
++      sessionReferenceOf: options === undefined ? undefined : options.sessionReferenceOf,
++    }
+     this.remoteEvents = registration
+     return async () => {
+       if (this.remoteEvents === registration) {
+@@ -267,6 +292,22 @@ export class TypertGatewayService extends Service implements TypertGateway {
+     }
+   }
+ 
++  /**
++   * Claim the sole per-connection frame-filter seat: two filters cannot
++   * compose, so a second registration throws. Each Client generation receives
++   * the filter built when its `$events` stream opened; releasing the seat
++   * leaves later generations unfiltered.
++   * @param factory - builds the generation filter from its open-time principal.
++   * @returns the disposer releasing the seat.
++   */
++  registerRemoteEventFrameFilter(factory: RemoteEventFrameFilterFactory): () => void {
++    if (this.eventFrameFilter !== undefined) {
++      throw new Error('typert gateway: forwarded Remote event frame filter is already registered')
++    }
++    this.eventFrameFilter = factory
++    return () => { this.eventFrameFilter = undefined }
++  }
++
+   private claimsEndpoint(endpoint: string): boolean {
+     if (endpoint === REMOTE_EVENT_RESULT_ENDPOINT) return true
+     const segments = endpoint.split('/')
+@@ -414,12 +455,17 @@ export class TypertGatewayService extends Service implements TypertGateway {
+       )
+     }
+     const lifetime = AbortSignal.any([signal, registration.lifetime.signal])
++    // Broadcast paths run outside any connection's request context, so the
++    // filter is built here, inside this generation's principal continuation,
++    // and stored on the client it will judge.
++    const frameFilter = this.eventFrameFilter?.(currentRequestPrincipal())
+     let clientId = randomUUID() as RemoteEventClientId
+     while (this.remoteEventClients.has(clientId)) clientId = randomUUID() as RemoteEventClientId
+     const client: RemoteEventClient = {
+       id: clientId,
+       queue: new RemoteEventQueue(),
+       deliveries: new Map(),
++      frameFilter,
+     }
+     this.remoteEventClients.set(clientId, client)
+     for (const pending of this.pendingRemoteEvents.values()) this.deliverRemoteEvent(pending, client)
+@@ -455,7 +501,14 @@ export class TypertGatewayService extends Service implements TypertGateway {
+       event: frame.event,
+       args: frame.args,
+     }
+-    for (const client of this.remoteEventClients.values()) client.queue.push(wire)
++    // Emit frames are judged only when the registration supplied an extractor
++    // that yields a Session id; extractor-less or reference-less events are
++    // state frames and pass without judgment.
++    const sessionId = this.remoteEvents?.sessionReferenceOf?.[frame.event]?.(frame.args)
++    for (const client of this.remoteEventClients.values()) {
++      if (sessionId !== undefined && !this.admits(client, sessionId, frame.event)) continue
++      client.queue.push(wire)
++    }
+   }
+ 
+   private startRemoteEvent(source: TypertRemoteEventInvocation): void {
+@@ -523,11 +576,36 @@ export class TypertGatewayService extends Service implements TypertGateway {
+   }
+ 
+   private deliverRemoteEvent(pending: PendingRemoteEvent, client: RemoteEventClient): void {
++    // Waterfall frames are always session-referenced; a denied generation is
++    // neither queued nor recorded, so it can never settle or observe the event.
++    if (!this.admits(client, pending.frame.agentId, pending.frame.event)) return
+     pending.deliveries.add(client)
+     client.deliveries.set(pending.id, pending)
+     client.queue.push(pending.frame)
+   }
+ 
++  /**
++   * Contained per-Client judgment for one session-referenced frame: a filter
++   * throw drops that frame for that Client with a warning instead of
++   * interrupting the broadcast loop or the stream.
++   * @param client - connected Client generation being judged.
++   * @param sessionId - Session the frame references.
++   * @param frameType - original Host event name.
++   * @returns whether the frame may enter the Client generation's queue.
++   */
++  private admits(client: RemoteEventClient, sessionId: string, frameType: string): boolean {
++    const filter = client.frameFilter
++    if (filter === undefined) return true
++    try {
++      return filter(sessionId, frameType)
++    } catch (error) {
++      this.ctx.logger.warn(
++        `typert gateway: frame filter dropped one ${JSON.stringify(frameType)} frame for session ${JSON.stringify(sessionId)}: ${String(error)}`,
++      )
++      return false
++    }
++  }
++
+   private receiveRemoteEventResult(
+     client: RemoteEventClient,
+     result: ReturnType<typeof parseRemoteEventResult>,
 diff --git a/packages/api/gateway/src/stream-server.ts b/packages/api/gateway/src/stream-server.ts
 index 28a3589542..a149e7f279 100644
 --- a/packages/api/gateway/src/stream-server.ts
@@ -83,6 +296,572 @@ index 28a3589542..a149e7f279 100644
          } catch {
            this.socket.close(1008, 'invalid Remote stream request')
          }
+diff --git a/packages/api/gateway/src/types.ts b/packages/api/gateway/src/types.ts
+index 9b4475cb9a..74221d276c 100644
+--- a/packages/api/gateway/src/types.ts
++++ b/packages/api/gateway/src/types.ts
+@@ -70,6 +70,46 @@ export type TypertRemoteEventSource = (
+   signal: AbortSignal,
+ ) => AsyncIterable<TypertRemoteEventDispatch>
+ 
++/**
++ * Extract the Session one forwarded notification references. A throwing
++ * extractor fails the whole event source (the registration's catch errors
++ * it), not just one frame, so table authors must return undefined for
++ * non-matching arguments and never throw.
++ * @param args - original Host event argument list after JSON validation.
++ * @returns the referenced Session id, or undefined for a state frame that references no Session.
++ */
++export type RemoteEventSessionReference = (args: readonly unknown[]) => string | undefined
++
++/**
++ * Judge one session-referenced frame for one Client generation. The judgment
++ * is synchronous because queue pushes run on synchronous broadcast paths.
++ * @param sessionId - Session the frame references.
++ * @param frameType - original Host event name.
++ * @returns whether the frame may enter this Client generation's queue.
++ */
++export type RemoteEventFrameFilter = (sessionId: string, frameType: string) => boolean
++
++/**
++ * Build the per-connection frame filter when a Client generation opens its
++ * `$events` stream, from the principal readable inside that open.
++ * @param principal - guard-supplied request principal, or undefined on carriers without one.
++ * @returns the filter judging every session-referenced frame of that generation.
++ */
++export type RemoteEventFrameFilterFactory = (principal: unknown) => RemoteEventFrameFilter
++
++/**
++ * Optional registration facts carried by the sole forwarded-event source.
++ */
++export interface RemoteEventRegistrationOptions {
++  /**
++   * Event name to Session-reference extractor. Events without an extractor,
++   * or whose extractor returns undefined, are state frames and pass without
++   * judgment; waterfall frames are always session-referenced and never
++   * consult this table.
++   */
++  readonly sessionReferenceOf?: Readonly<Record<string, RemoteEventSessionReference>>
++}
++
+ /** Carrier-facing access to decoded Remote streams and their stable failures. */
+ export interface TypertGatewayWireStream {
+   /**
+@@ -126,13 +166,28 @@ export interface TypertGateway {
+    * Register the application-selected forwarded-event source.
+    * @param source - stream factory installed by the Remote assembly.
+    * @param host - stable Host facts included in each Client generation's opening frame.
++   * @param options - optional registration facts, currently the Session-reference extractors classifying emit events.
+    * @returns disposer removing this exact source and cancelling its active streams.
+    */
+   registerRemoteEvents(
+     source: TypertRemoteEventSource,
+     host: RemoteEventHostInfo,
++    options?: RemoteEventRegistrationOptions,
+   ): () => Promise<void>
+ 
++  /**
++   * Claim the sole per-connection frame-filter seat. The Gateway builds one
++   * filter for each Client generation when its `$events` stream opens, from
++   * the principal readable at that moment; broadcast paths run outside any
++   * connection's request context, so the judgment always uses that snapshot.
++   * A denied session-referenced frame is neither queued nor recorded as a
++   * delivery for the generation. With no seat claimed, every Client receives
++   * forwarded events unchanged.
++   * @param factory - builds the generation filter from its open-time principal.
++   * @returns the disposer releasing the seat for later generations.
++   */
++  registerRemoteEventFrameFilter(factory: RemoteEventFrameFilterFactory): () => void
++
+   /**
+    * Invoke one live Remote method without assuming a carrier or response envelope.
+    * @param request - decoded endpoint and named wire arguments.
+diff --git a/packages/api/gateway/tests/event-frame-filter.host.spec.ts b/packages/api/gateway/tests/event-frame-filter.host.spec.ts
+new file mode 100644
+index 0000000000..b6618dbbd6
+--- /dev/null
++++ b/packages/api/gateway/tests/event-frame-filter.host.spec.ts
+@@ -0,0 +1,480 @@
++/** Per-connection frame-filter seat over the forwarded `$events` stream. */
++
++import { randomUUID } from 'node:crypto'
++import { once } from 'node:events'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import WebSocket, { type RawData } from 'ws'
++import { Context } from '@deepseek-ai/cordis'
++import { apply as applyConnection, inject as connectionInject } from '@deepseek-ai/dsh-client-connection'
++import WebServer from '@deepseek-ai/dsh-host-webserver'
++import TypertGatewayService, {
++  type RemoteEventFrameFilterFactory,
++  type RemoteEventSessionReference,
++  type TypertRemoteEventDispatch,
++  type TypertRemoteEventInvocation,
++  type TypertRemoteEventOutcome,
++} from '@deepseek-ai/dsh-api-gateway'
++import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
++import type { TypertContextMap, TypertContextWire } from '@deepseek-ai/dsh-typert-protocol'
++import type {
++  RemoteEventClientId,
++  RemoteEventId,
++  RemoteEventInvocationFrame,
++} from '../src/stream-protocol.ts'
++import { provideBrowserCredentials } from './browser-credentials.ts'
++
++vi.mock('node:crypto', async (importOriginal) => {
++  const actual = await importOriginal<typeof import('node:crypto')>()
++  return { ...actual, randomUUID: vi.fn(actual.randomUUID) }
++})
++
++const randomUuid = vi.mocked(randomUUID)
++const roots: Context[] = []
++const browserCookies = new WeakMap<Context, string>()
++const REMOTE_HOST = { home: '/home/frame-filter' } as const
++const VISIBLE = 'sess-a'
++const INVISIBLE = 'sess-b'
++type AgentWireId = TypertContextWire<TypertContextMap['agent']>
++const agentId = (value: string): AgentWireId => value as AgentWireId
++const remoteEventId = (value: string): RemoteEventId => value as RemoteEventId
++
++/** api-session/added-style extractor: the first argument is a summary carrying sessionId. */
++const addedSessionReference: RemoteEventSessionReference = (args) => {
++  const summary = args[0]
++  if (typeof summary !== 'object' || summary === null) return undefined
++  const sessionId = (summary as { readonly sessionId?: unknown }).sessionId
++  return typeof sessionId === 'string' ? sessionId : undefined
++}
++
++/** Exchange this test Host's process token for its WebSocket/HTTP Cookie header. */
++function browserCookie(ctx: Context): string {
++  const existing = browserCookies.get(ctx)
++  if (existing !== undefined) return existing
++  const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
++  const target = new URL(ctx.connection.authenticatedUrl(origin))
++  let setCookie: string | undefined
++  ctx.connection.authorizeIndex({
++    method: 'GET',
++    url: `${target.pathname}${target.search}`,
++    headers: { host: target.host },
++  }, {
++    writeHead(_status, headers) { setCookie = headers?.['set-cookie'] },
++    end() {},
++  })
++  if (setCookie === undefined) throw new Error('frame filter fixture did not receive a browser cookie')
++  const cookie = setCookie.split(';', 1)[0]!
++  browserCookies.set(ctx, cookie)
++  return cookie
++}
++
++class RemoteEventSourceProbe {
++  readonly source = (signal: AbortSignal): AsyncIterable<TypertRemoteEventDispatch> => {
++    this.signal = signal
++    return this.iterate(signal)
++  }
++
++  signal: AbortSignal | undefined
++  private readonly dispatches: TypertRemoteEventDispatch[] = []
++  private wake: (() => void) | undefined
++
++  push(dispatch: TypertRemoteEventDispatch): void {
++    this.dispatches.push(dispatch)
++    this.wake?.()
++    this.wake = undefined
++  }
++
++  private async *iterate(signal: AbortSignal): AsyncGenerator<TypertRemoteEventDispatch> {
++    const aborted = (): void => {
++      this.wake?.()
++      this.wake = undefined
++    }
++    signal.addEventListener('abort', aborted, { once: true })
++    try {
++      while (!signal.aborted) {
++        while (this.dispatches.length > 0) {
++          yield this.dispatches.shift() as TypertRemoteEventDispatch
++        }
++        if (signal.aborted) return
++        await new Promise<void>((resolve) => { this.wake = resolve })
++        this.wake = undefined
++      }
++    } finally {
++      signal.removeEventListener('abort', aborted)
++    }
++  }
++}
++
++interface PendingInvocationProbe {
++  readonly dispatch: TypertRemoteEventInvocation
++  readonly outcome: Promise<TypertRemoteEventOutcome>
++  readonly resolve: (outcome: TypertRemoteEventOutcome) => void
++  readonly reject: (reason: unknown) => void
++}
++
++function pendingInvocation(context: Context, prompt = 'ship', signal?: AbortSignal): PendingInvocationProbe {
++  const subject = { ctx: context }
++  const settled = Promise.withResolvers<TypertRemoteEventOutcome>()
++  const resolve = vi.fn((outcome: TypertRemoteEventOutcome) => {
++    settled.resolve(outcome)
++  })
++  const reject = vi.fn((reason: unknown) => {
++    settled.reject(reason)
++  })
++  return {
++    dispatch: {
++      event: 'fixture/approval',
++      request: signal === undefined ? { prompt, agent: subject } : { prompt, agent: subject, signal },
++      context: { value: context, subject },
++      resolve,
++      reject,
++    },
++    outcome: settled.promise,
++    resolve,
++    reject,
++  }
++}
++
++/** Keep a waterfall that teardown cancels from surfacing an unhandled rejection. */
++function settledByTeardown(pending: PendingInvocationProbe): void {
++  void pending.outcome.catch(() => {})
++}
++
++interface SessionAgents {
++  readonly visible: Context
++  readonly invisible: Context
++}
++
++function registerSessionAgents(ctx: Context): SessionAgents {
++  const visible = ctx.extend()
++  const invisible = ctx.extend()
++  ctx.typert.contexts.registerHost('agent', {
++    wire: 'agentId',
++    wireTypeSymbol: '@fixture#AgentId',
++    identity: candidate =>
++      candidate === visible ? agentId(VISIBLE) : candidate === invisible ? agentId(INVISIBLE) : undefined,
++    resolve: id => id === VISIBLE ? visible : id === INVISIBLE ? invisible : undefined,
++  })
++  return { visible, invisible }
++}
++
++interface FilterHarness {
++  readonly ctx: Context
++  readonly source: RemoteEventSourceProbe
++}
++
++/** Composition under proof: the real WebServer, Connection bridge, Gateway, and event source. */
++async function boot(): Promise<FilterHarness> {
++  const ctx = new Context()
++  roots.push(ctx)
++  provideBrowserCredentials(ctx)
++  await ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
++  await ctx.plugin({ inject: [...connectionInject], apply: applyConnection })
++  await ctx.plugin(TypertRegistry)
++  await ctx.plugin(TypertGatewayService)
++  return { ctx, source: new RemoteEventSourceProbe() }
++}
++
++interface RemoteEventTestClient {
++  readonly socket: WebSocket
++  readonly frames: Record<string, unknown>[]
++  readonly streamId: string
++  readonly clientId: RemoteEventClientId
++  readonly origin: string
++  readonly cookie: string
++}
++
++async function openEventClient(ctx: Context, streamId: string): Promise<RemoteEventTestClient> {
++  const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
++  const cookie = browserCookie(ctx)
++  const socket = new WebSocket(`${origin.replace('http:', 'ws:')}/api/remote.mux`, {
++    headers: { cookie },
++  })
++  await once(socket, 'open')
++  const frames: Record<string, unknown>[] = []
++  socket.on('message', (data) => { frames.push(JSON.parse(rawText(data)) as Record<string, unknown>) })
++  sendOpen(socket, streamId, '$events', {})
++  let clientId: RemoteEventClientId | undefined
++  await vi.waitFor(() => {
++    const ready = frames.find(frame => frame.type === 'item'
++      && frame.streamId === streamId
++      && typeof frame.value === 'object'
++      && frame.value !== null
++      && Reflect.get(frame.value, 'type') === 'ready')
++    const candidate: unknown = ready === undefined ? undefined : Reflect.get(ready.value as object, 'clientId')
++    expect(typeof candidate).toBe('string')
++    if (typeof candidate === 'string') clientId = candidate as RemoteEventClientId
++  })
++  if (clientId === undefined) throw new Error('Remote event stream omitted its Client id')
++  return { socket, frames, streamId, clientId, origin, cookie }
++}
++
++function waterfallFrames(client: RemoteEventTestClient): RemoteEventInvocationFrame[] {
++  return client.frames
++    .filter(frame => frame.type === 'item' && frame.streamId === client.streamId)
++    .map(frame => frame.value)
++    .filter((value): value is RemoteEventInvocationFrame => typeof value === 'object'
++      && value !== null
++      && Object.hasOwn(value, 'eventId'))
++}
++
++function deliveredInvocation(client: RemoteEventTestClient): RemoteEventInvocationFrame | undefined {
++  return waterfallFrames(client)[0]
++}
++
++function emitValues(client: RemoteEventTestClient, event: string): Record<string, unknown>[] {
++  return client.frames
++    .filter(frame => frame.type === 'item' && frame.streamId === client.streamId)
++    .map(frame => frame.value)
++    .filter((value): value is Record<string, unknown> => typeof value === 'object'
++      && value !== null
++      && Reflect.get(value, 'type') === 'emit'
++      && Reflect.get(value, 'event') === event)
++}
++
++async function sendEventResult(
++  client: RemoteEventTestClient,
++  eventId: RemoteEventId,
++  outcome:
++    | { readonly kind: 'next' }
++    | { readonly kind: 'result'; readonly value?: unknown },
++): Promise<void> {
++  const rpcId = `remote-event-result-${client.streamId}`
++  const response = await fetch(`${client.origin}/api/$events/result`, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json', cookie: client.cookie },
++    body: JSON.stringify({
++      type: 'client-request',
++      rpcId,
++      method: '$events/result',
++      payload: {
++        args: { clientId: client.clientId, eventId, outcome },
++      },
++    }),
++  })
++  expect(response.status).toBe(200)
++  const body = await response.json() as { readonly result?: { readonly ok?: boolean; readonly error?: { message?: string } } }
++  if (body.result?.ok !== true) {
++    throw new Error(body.result?.error?.message ?? 'Remote event result failed')
++  }
++}
++
++function sendOpen(socket: WebSocket, streamId: string, endpoint: string, args: object): void {
++  socket.send(JSON.stringify({ type: 'open', streamId, endpoint, payload: { args } }))
++}
++
++function rawText(data: RawData): string {
++  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8')
++  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8')
++  return Buffer.from(data).toString('utf8')
++}
++
++afterEach(async () => {
++  randomUuid.mockClear()
++  await Promise.all(roots.splice(0).map(ctx => ctx.fiber.dispose()))
++})
++
++describe('forwarded event frame filter', () => {
++  it('claims one seat, rejects a second registration, and restores unfiltered behavior after release', { timeout: 20_000 }, async () => {
++    const { ctx, source } = await boot()
++    const agents = registerSessionAgents(ctx)
++    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
++    const denyAll: RemoteEventFrameFilterFactory = () => () => false
++    const release = ctx.typertGateway.registerRemoteEventFrameFilter(denyAll)
++    expect(() => { ctx.typertGateway.registerRemoteEventFrameFilter(denyAll) })
++      .toThrow(/already registered/)
++    release()
++
++    const pending = pendingInvocation(agents.invisible, 'after-release')
++    settledByTeardown(pending)
++    source.push(pending.dispatch)
++    const client = await openEventClient(ctx, 'events-seat')
++    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
++    expect(deliveredInvocation(client)).toMatchObject({
++      type: 'waterfall',
++      agentId: INVISIBLE,
++      request: { prompt: 'after-release' },
++    })
++    await sendEventResult(client, deliveredInvocation(client)!.eventId, { kind: 'result', value: 'unfiltered' })
++    await expect(pending.outcome).resolves.toEqual({ kind: 'result', value: 'unfiltered' })
++
++    const reclaimed = ctx.typertGateway.registerRemoteEventFrameFilter(denyAll)
++    reclaimed()
++    client.socket.close()
++    await unregister()
++  })
++
++  it('builds the connection filter from the guard principal at stream open', { timeout: 20_000 }, async () => {
++    const { ctx, source } = await boot()
++    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
++    const principal = { userId: 'frame-filter-e2e', roles: ['viewer'] }
++    const releaseGuard = ctx.webServer.registerGuard((_req, kind) =>
++      kind === 'upgrade' ? { allow: true, principal } : { allow: true })
++    const received: unknown[] = []
++    ctx.typertGateway.registerRemoteEventFrameFilter((receivedPrincipal) => {
++      received.push(receivedPrincipal)
++      return () => true
++    })
++    const client = await openEventClient(ctx, 'events-principal')
++    await vi.waitFor(() => { expect(received).toEqual([principal]) })
++    client.socket.close()
++    releaseGuard()
++    await unregister()
++  })
++
++  it('judges emit frames through the session-reference table and passes state frames', { timeout: 20_000 }, async () => {
++    const { ctx, source } = await boot()
++    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST, {
++      sessionReferenceOf: { 'api-session/added': addedSessionReference },
++    })
++    const principals: unknown[] = []
++    ctx.typertGateway.registerRemoteEventFrameFilter((principal) => {
++      principals.push(principal)
++      return sessionId => sessionId === VISIBLE
++    })
++    const client = await openEventClient(ctx, 'events-emit')
++    expect(principals).toEqual([undefined])
++
++    source.push({ event: 'api-session/added', args: [{ sessionId: INVISIBLE, title: 'hidden' }] })
++    source.push({ event: 'api-session/added', args: [{ sessionId: VISIBLE, title: 'own' }] })
++    source.push({ event: 'settings/document-updated', args: [{ path: '/home/frame-filter' }] })
++    await vi.waitFor(() => {
++      expect(emitValues(client, 'settings/document-updated')).toEqual([
++        { type: 'emit', event: 'settings/document-updated', args: [{ path: '/home/frame-filter' }] },
++      ])
++    })
++    expect(emitValues(client, 'api-session/added')).toEqual([
++      { type: 'emit', event: 'api-session/added', args: [{ sessionId: VISIBLE, title: 'own' }] },
++    ])
++    client.socket.close()
++    await unregister()
++  })
++
++  it('filters pending waterfalls replayed to a new connection', { timeout: 20_000 }, async () => {
++    const { ctx, source } = await boot()
++    const agents = registerSessionAgents(ctx)
++    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
++    ctx.typertGateway.registerRemoteEventFrameFilter(() => sessionId => sessionId === VISIBLE)
++    const invisibleEventId = '00000000-0000-4000-8000-000000000041' as ReturnType<typeof randomUUID>
++    const visibleEventId = '00000000-0000-4000-8000-000000000042' as ReturnType<typeof randomUUID>
++
++    randomUuid.mockReturnValueOnce(invisibleEventId)
++    const invisible = pendingInvocation(agents.invisible, 'hidden')
++    settledByTeardown(invisible)
++    source.push(invisible.dispatch)
++    await vi.waitFor(() => { expect(randomUuid).toHaveBeenCalledTimes(1) })
++    randomUuid.mockReturnValueOnce(visibleEventId)
++    const visible = pendingInvocation(agents.visible, 'own')
++    source.push(visible.dispatch)
++    await vi.waitFor(() => { expect(randomUuid).toHaveBeenCalledTimes(2) })
++
++    const client = await openEventClient(ctx, 'events-baseline')
++    const frame = deliveredInvocation(client)
++    expect(frame).toMatchObject({
++      type: 'waterfall',
++      eventId: visibleEventId,
++      agentId: VISIBLE,
++      request: { prompt: 'own' },
++    })
++    expect(waterfallFrames(client).map(delivered => delivered.agentId)).toEqual([VISIBLE])
++
++    // The denied Client never became a delivery, so its result is an idempotent no-op.
++    await sendEventResult(client, remoteEventId(invisibleEventId), { kind: 'next' })
++    expect(invisible.resolve).not.toHaveBeenCalled()
++
++    await sendEventResult(client, remoteEventId(visibleEventId), { kind: 'result', value: 'allowed' })
++    await expect(visible.outcome).resolves.toEqual({ kind: 'result', value: 'allowed' })
++    client.socket.close()
++    await unregister()
++  })
++
++  it('never delivers a cancel frame to a Client denied the waterfall', { timeout: 20_000 }, async () => {
++    const { ctx, source } = await boot()
++    const agents = registerSessionAgents(ctx)
++    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
++    ctx.typertGateway.registerRemoteEventFrameFilter(() => () => false)
++    const client = await openEventClient(ctx, 'events-denied-cancel')
++    const eventId = '00000000-0000-4000-8000-000000000051' as ReturnType<typeof randomUUID>
++
++    randomUuid.mockReturnValueOnce(eventId)
++    const cancellation = new AbortController()
++    const denied = pendingInvocation(agents.invisible, 'denied', cancellation.signal)
++    settledByTeardown(denied)
++    source.push(denied.dispatch)
++    await vi.waitFor(() => { expect(randomUuid).toHaveBeenCalledTimes(1) })
++
++    // finishRemoteEvent routes the cancel frame only to recorded deliveries,
++    // and the denied generation never became one.
++    cancellation.abort()
++    source.push({ event: 'settings/document-updated', args: [{ path: '/home/frame-filter' }] })
++    await vi.waitFor(() => {
++      expect(emitValues(client, 'settings/document-updated')).toEqual([
++        { type: 'emit', event: 'settings/document-updated', args: [{ path: '/home/frame-filter' }] },
++      ])
++    })
++    const delivered = client.frames
++      .filter(frame => frame.type === 'item' && frame.streamId === client.streamId)
++      .map(frame => frame.value)
++    expect(delivered.filter(value => Reflect.get(value as object, 'type') === 'cancel')).toEqual([])
++    expect(delivered.filter(value => Reflect.get(value as object, 'type') === 'waterfall')).toEqual([])
++    await expect(denied.outcome).rejects.toBeTruthy()
++    client.socket.close()
++    await unregister()
++  })
++
++  it('filters live waterfalls started after the connection', { timeout: 20_000 }, async () => {
++    const { ctx, source } = await boot()
++    const agents = registerSessionAgents(ctx)
++    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
++    ctx.typertGateway.registerRemoteEventFrameFilter(() => sessionId => sessionId === VISIBLE)
++    const client = await openEventClient(ctx, 'events-live')
++
++    const invisible = pendingInvocation(agents.invisible, 'hidden')
++    settledByTeardown(invisible)
++    const visible = pendingInvocation(agents.visible, 'own')
++    source.push(invisible.dispatch)
++    source.push(visible.dispatch)
++    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
++    expect(waterfallFrames(client).map(delivered => delivered.agentId)).toEqual([VISIBLE])
++
++    await sendEventResult(client, deliveredInvocation(client)!.eventId, { kind: 'result', value: 'go' })
++    await expect(visible.outcome).resolves.toEqual({ kind: 'result', value: 'go' })
++    expect(invisible.resolve).not.toHaveBeenCalled()
++    client.socket.close()
++    await unregister()
++  })
++
++  it('drops the frame with a warning when the filter throws and keeps the stream alive', { timeout: 20_000 }, async () => {
++    const { ctx, source } = await boot()
++    const agents = registerSessionAgents(ctx)
++    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST, {
++      sessionReferenceOf: { 'api-session/added': addedSessionReference },
++    })
++    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
++    ctx.typertGateway.registerRemoteEventFrameFilter(() => (sessionId) => {
++      if (sessionId === INVISIBLE) throw new Error('frame filter fixture exploded')
++      return true
++    })
++    const client = await openEventClient(ctx, 'events-fail-closed')
++
++    source.push({ event: 'api-session/added', args: [{ sessionId: INVISIBLE }] })
++    source.push({ event: 'api-session/added', args: [{ sessionId: VISIBLE }] })
++    const invisible = pendingInvocation(agents.invisible, 'hidden')
++    settledByTeardown(invisible)
++    const visible = pendingInvocation(agents.visible, 'own')
++    source.push(invisible.dispatch)
++    source.push(visible.dispatch)
++    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
++    expect(waterfallFrames(client).map(delivered => delivered.agentId)).toEqual([VISIBLE])
++    await vi.waitFor(() => {
++      expect(emitValues(client, 'api-session/added')).toEqual([
++        { type: 'emit', event: 'api-session/added', args: [{ sessionId: VISIBLE }] },
++      ])
++    })
++    expect(warn.mock.calls.filter(call => String(call[0]).includes('frame filter'))).toHaveLength(2)
++
++    await sendEventResult(client, deliveredInvocation(client)!.eventId, { kind: 'result', value: 'ok' })
++    await expect(visible.outcome).resolves.toEqual({ kind: 'result', value: 'ok' })
++    client.socket.close()
++    await unregister()
++  })
++})
 diff --git a/packages/api/gateway/tests/request-principal.host.spec.ts b/packages/api/gateway/tests/request-principal.host.spec.ts
 new file mode 100644
 index 0000000000..6d31d4bfdb
@@ -251,8 +1030,159 @@ index 0000000000..6d31d4bfdb
 +    }
 +  })
 +})
+diff --git a/packages/api/remotes/README.i18n.yaml b/packages/api/remotes/README.i18n.yaml
+index 43991614b9..a06016ca3d 100644
+--- a/packages/api/remotes/README.i18n.yaml
++++ b/packages/api/remotes/README.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write packages/api/remotes/README.md
+-README.md: 7f855bd1cd37c0799f10cadfaf2167fe34f7ea40
+-README.zh.md: edad8d735dd914e44bcf283336f78b243e3715d9
++README.md: cd9001e61e64f5b4fdcb0a3a3e8854d5ec86d2a5
++README.zh.md: b8f7fdd254c8401b8f10bcbbd69083805a58e66a
+diff --git a/packages/api/remotes/README.md b/packages/api/remotes/README.md
+index 7f855bd1cd..cd9001e61e 100644
+--- a/packages/api/remotes/README.md
++++ b/packages/api/remotes/README.md
+@@ -42,6 +42,8 @@ The listener signature is not restated here. Each allowlisted event's Cordis `Ev
+ 
+ The Host entry registers an independent allowlist listener set and queue for each Client stream. It rejects non-JSON ordinary-event arguments before enqueueing. For a waterfall, it projects only the top-level Agent identity and JSON request fields; a Client result must also be lossless JSON, while `next()` delegates to the following Host listener. The source attaches all listeners synchronously before `ctx.typertGateway.registerRemoteEvents()` exposes Gateway's internal `$events` logical stream, so its first `ready` item proves that incremental delivery is active and carries the Host home for Client path display. Withdrawing the registration aborts active streams.
+ 
++The registration also carries the Session-reference extraction table for the forwarded `api-session/*` notifications: `SESSION_CONTROLLER_SESSION_REFERENCES`, re-exported by `src/remote-events.ts` because the emitter owns those argument shapes. The Gateway's per-connection frame-filter seat reads the table to classify these emit events; with no seat claimed, the table is inert.
++
+ <a id="build-boundary"></a>
+ ## Build boundary
+ 
+diff --git a/packages/api/remotes/README.zh.md b/packages/api/remotes/README.zh.md
+index edad8d735d..b8f7fdd254 100644
+--- a/packages/api/remotes/README.zh.md
++++ b/packages/api/remotes/README.zh.md
+@@ -42,6 +42,8 @@ Client 组合挂载 Commands、凭据、settings、Goal、动态 Cordis、文件
+ 
+ Host entry 为每条 Client stream 独立注册 allowlist listener 和队列，并在普通事件入队前拒绝非 JSON 参数。对于 waterfall，它只投影顶层 Agent 身份与 JSON 请求字段；Client 结果也必须能无损表示为 JSON，而 `next()` 会委托给后续 Host listener。该 source 在 `ctx.typertGateway.registerRemoteEvents()` 暴露 Gateway 内部的 `$events` logical stream 前同步挂好所有 listener，因此首个 `ready` 项既能证明增量投递已就绪，也会携带供 Client 显示路径的 Host home。撤回注册会中止活动 stream。
+ 
++注册项还携带转发 `api-session/*` 通知的 Session 引用提取表：`SESSION_CONTROLLER_SESSION_REFERENCES` 由 `src/remote-events.ts` 再导出，因为这些参数形状属于发射方。Gateway 的每连接帧过滤器席位读取该表为这些 emit 事件分类；未占用席位时，这张表不起作用。
++
+ <a id="build-boundary"></a>
+ ## 构建边界
+ 
+diff --git a/packages/api/remotes/src/index.ts b/packages/api/remotes/src/index.ts
+index e775d3a5ae..5a1d1265b8 100644
+--- a/packages/api/remotes/src/index.ts
++++ b/packages/api/remotes/src/index.ts
+@@ -11,7 +11,7 @@ import type {
+ import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
+ import { isJsonValue } from '@deepseek-ai/dsh-session'
+ import type { JsonValue } from '@deepseek-ai/dsh-session'
+-import { API_REMOTE_FORWARDED_EVENTS } from './remote-events.ts'
++import { API_REMOTE_FORWARDED_EVENTS, SESSION_CONTROLLER_SESSION_REFERENCES } from './remote-events.ts'
+ 
+ // The owner packages' client-safe `./types` exports carry the cordis `Events`
+ // declarations for every allowlisted event. Pulling them into this face is what
+@@ -36,7 +36,11 @@ export const inject = ['typertGateway']
+ /** Host plugin body registering this application's selected Cordis event source. */
+ export function apply(ctx: Context): void {
+   ctx.effect(
+-    () => ctx.typertGateway.registerRemoteEvents(remoteEventSource(ctx), { home: homedir() }),
++    () => ctx.typertGateway.registerRemoteEvents(
++      remoteEventSource(ctx),
++      { home: homedir() },
++      { sessionReferenceOf: SESSION_CONTROLLER_SESSION_REFERENCES },
++    ),
+     'api-remotes: forwarded Cordis event source',
+   )
+ }
+diff --git a/packages/api/remotes/src/remote-events.ts b/packages/api/remotes/src/remote-events.ts
+index bf98fe536c..465e016f2d 100644
+--- a/packages/api/remotes/src/remote-events.ts
++++ b/packages/api/remotes/src/remote-events.ts
+@@ -3,10 +3,16 @@
+  * compiler faces list this file, so the Host forwarding loop and the consumer
+  * `ctx.remote.$on` key face read one declaration instead of two copies that
+  * could drift; `./types.ts` derives the type projection from it and stays
+- * type-only.
++ * type-only. The re-exported Session-reference extractors join the same
++ * registration: the emitter owns the `api-session/*` argument shapes, so the
++ * Host entry hands its table to the Gateway instead of the Gateway naming
++ * these events.
+  */
+ 
+-import { SESSION_CONTROLLER_REMOTE_EVENTS } from '@deepseek-ai/dsh-api-session-controller/remote-events'
++import {
++  SESSION_CONTROLLER_REMOTE_EVENTS,
++  SESSION_CONTROLLER_SESSION_REFERENCES,
++} from '@deepseek-ai/dsh-api-session-controller/remote-events'
+ import type { TypertForwardableEventEntry } from '@deepseek-ai/dsh-typert-protocol'
+ 
+ /**
+@@ -29,3 +35,5 @@ export const API_REMOTE_FORWARDED_EVENTS = [
+   { event: 'settings/document-updated', mode: 'emit' },
+   { event: 'user-questions/request', mode: 'waterfall' },
+ ] as const satisfies readonly TypertForwardableEventEntry[]
++
++export { SESSION_CONTROLLER_SESSION_REFERENCES }
+diff --git a/packages/api/remotes/tests/remote-events.host.spec.ts b/packages/api/remotes/tests/remote-events.host.spec.ts
+index 1d2e8c235d..68d0cf10a6 100644
+--- a/packages/api/remotes/tests/remote-events.host.spec.ts
++++ b/packages/api/remotes/tests/remote-events.host.spec.ts
+@@ -2,6 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
+ import type { Fiber } from '@deepseek-ai/cordis'
+ import type {
+   RemoteEventHostInfo,
++  RemoteEventRegistrationOptions,
+   TypertRemoteEventInvocation,
+   TypertRemoteEventSource,
+ } from '@deepseek-ai/dsh-api-gateway'
+@@ -12,10 +13,12 @@ import { apply, inject } from '../src/index.ts'
+ interface GatewayProbe {
+   source: TypertRemoteEventSource | undefined
+   host: RemoteEventHostInfo | undefined
++  options: RemoteEventRegistrationOptions | undefined
+   removals: number
+   registerRemoteEvents(
+     source: TypertRemoteEventSource,
+     host: RemoteEventHostInfo,
++    options?: RemoteEventRegistrationOptions,
+   ): () => Promise<void>
+ }
+ 
+@@ -28,14 +31,17 @@ async function setup(): Promise<{
+   const gateway: GatewayProbe = {
+     source: undefined,
+     host: undefined,
++    options: undefined,
+     removals: 0,
+-    registerRemoteEvents(source, host) {
++    registerRemoteEvents(source, host, options) {
+       gateway.source = source
+       gateway.host = host
++      gateway.options = options
+       return async () => {
+         if (gateway.source !== source) return
+         gateway.source = undefined
+         gateway.host = undefined
++        gateway.options = undefined
+         gateway.removals += 1
+       }
+     },
+@@ -229,4 +235,13 @@ describe('Remote event Host source', () => {
+     await fiber.dispose()
+     await ctx.fiber.dispose()
+   })
++
++  it('hands the Gateway session reference extractors for forwarded api-session events', async () => {
++    const { ctx, gateway } = await setup()
++    expect(gateway.options).toBeDefined()
++    const extractAdded = gateway.options?.sessionReferenceOf?.['api-session/added']
++    expect(extractAdded).toBeTypeOf('function')
++    expect(extractAdded?.([{ sessionId: 'sess-added', title: 'a session' }])).toBe('sess-added')
++    await ctx.fiber.dispose()
++  })
+ })
 diff --git a/packages/api/session-controller/README.i18n.yaml b/packages/api/session-controller/README.i18n.yaml
-index fc66cdfceb..23535d686d 100644
+index fc66cdfceb..8c6f7e734b 100644
 --- a/packages/api/session-controller/README.i18n.yaml
 +++ b/packages/api/session-controller/README.i18n.yaml
 @@ -2,5 +2,5 @@
@@ -261,21 +1191,22 @@ index fc66cdfceb..23535d686d 100644
  #   pnpm run verify-translation-pairing --write packages/api/session-controller/README.md
 -README.md: 689635b83bce71e3aecfedf371685a24bede55ab
 -README.zh.md: 68da7db60b38aca1b72c991005438ced45b348ea
-+README.md: 0e9dd61d64e6cf4d7853d94ac2bce96ca948dd2b
-+README.zh.md: f709a381e333861f0d024311cd6f925080648e05
++README.md: f1c7d86605a0cd0816a32c1f8392b015093e2426
++README.zh.md: c46ae1b4c80be0b386288febc70bc88ef851b2fe
 diff --git a/packages/api/session-controller/README.md b/packages/api/session-controller/README.md
-index 689635b83b..0e9dd61d64 100644
+index 689635b83b..f1c7d86605 100644
 --- a/packages/api/session-controller/README.md
 +++ b/packages/api/session-controller/README.md
-@@ -13,6 +13,7 @@ English | [中文](README.zh.md)
+@@ -13,6 +13,8 @@ English | [中文](README.zh.md)
  ## Table of Contents
  
  - [Use this package](#use-this-package)
 +- [The session filter seat](#the-session-filter-seat)
++- [The control frame filter seat](#the-control-frame-filter-seat)
  - [Configuration](#configuration)
  - [Model Experience](#model-experience)
  - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
-@@ -33,6 +34,15 @@ The Session object also carries local submission echoes: `session.beginSubmissio
+@@ -33,6 +35,26 @@ The Session object also carries local submission echoes: `session.beginSubmissio
  
  -----
  
@@ -288,10 +1219,21 @@ index 689635b83b..0e9dd61d64 100644
 +
 +-----
 +
++<a id="the-control-frame-filter-seat"></a>
++## The control frame filter seat
++
++`ctx.sessionController.registerControlFrameFilter(factory)` claims the single per-stream control frame-filter seat: a second registration throws because two filters cannot compose, and the returned disposer releases the seat for later generations. When a `session/control` stream generation opens, the controller calls the factory once inside that open's request-principal continuation and stores the returned filter on the stream; broadcast paths run outside any connection's request context, so every later judgment reuses this open-time value, and a carrier without a guard principal builds its filter from `undefined`. The filter is synchronous — `(sessionId, frameType) => boolean`, with `frameType` one of `'baseline'`, `'queue'`, `'jobs'`, or `'projection'` — because baseline building and broadcast queue pushes are synchronous paths.
++
++Every control frame is Session-referenced and judged at three points. The opening baseline judges the Session list once per Session as `'baseline'`, so the queues, jobs, and projections records share one key set. Live `queue`, `jobs`, and `projection` broadcasts are judged per stream with the frame's own type. A `session/created` notification broadcasts the new Session's jobs frame through the same per-stream judgment. A filter that throws drops that frame for that stream with `logger.warn` (a baseline throw excludes that one Session) and never interrupts the broadcast loop or the stream. With no seat claimed, every stream receives control frames byte-identical to an unconfigured deployment.
++
++`SESSION_CONTROLLER_SESSION_REFERENCES` (from the `remote-events` subpath) declares the Session-reference extractors for the `api-session/*` notifications this package emits: `api-session/added` reads the summary's `sessionId` field, and the other four read their first argument. The Remote assembly hands the table to the Gateway's forwarded-event registration; the argument shapes belong to this emitter, so the Gateway stays free of these event names. Extractors return `undefined` for non-matching arguments and never throw — a throwing extractor would fail the whole event source.
++
++-----
++
  <a id="configuration"></a>
  ## Configuration
  
-@@ -61,6 +71,8 @@ No direct effect; model requests remain owned by the Agent and LLM packages.
+@@ -61,6 +83,8 @@ No direct effect; model requests remain owned by the Agent and LLM packages.
  - Control baselines represent process-local state and therefore cannot reconstruct jobs after a Host restart.
  - A failed follow resumption remains visible to the caller instead of retrying indefinitely.
  - File-reference completion uses the shared Agent lookup and can resume a cold Session; the `skills/list` catalog is the non-activating alternative for skill metadata.
@@ -301,18 +1243,19 @@ index 689635b83b..0e9dd61d64 100644
  
  <a id="dev-note"></a>
 diff --git a/packages/api/session-controller/README.zh.md b/packages/api/session-controller/README.zh.md
-index 68da7db60b..f709a381e3 100644
+index 68da7db60b..c46ae1b4c8 100644
 --- a/packages/api/session-controller/README.zh.md
 +++ b/packages/api/session-controller/README.zh.md
-@@ -13,6 +13,7 @@ kind: "package-reference"
+@@ -13,6 +13,8 @@ kind: "package-reference"
  ## 目录
  
  - [使用本包](#use-this-package)
 +- [Session 过滤席位](#the-session-filter-seat)
++- [控制帧过滤席位](#the-control-frame-filter-seat)
  - [配置](#configuration)
  - [模型体验](#model-experience)
  - [已知限制与延期工作](#known-limitations-and-deferred-work)
-@@ -33,6 +34,15 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用
+@@ -33,6 +35,26 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用
  
  -----
  
@@ -325,10 +1268,21 @@ index 68da7db60b..f709a381e3 100644
 +
 +-----
 +
++<a id="the-control-frame-filter-seat"></a>
++## 控制帧过滤席位
++
++`ctx.sessionController.registerControlFrameFilter(factory)` 占据唯一的每流控制帧过滤席位：第二次注册会 throw，因为两个过滤器无法组合；返回的 disposer 为之后的流代释放该席位。当一代 `session/control` 流开流时，controller 在该次开流的请求 principal 续体内调用一次 factory，并把返回的过滤器挂到这条流上；广播路径运行在任何连接的请求上下文之外，因此后续判定都复用这个开流时的值，没有 guard principal 的载体以 `undefined` 构造自己的过滤器。过滤器是同步的 —— `(sessionId, frameType) => boolean`，`frameType` 取 `'baseline'`、`'queue'`、`'jobs'` 或 `'projection'` 之一 —— 因为 baseline 构建与广播入队都是同步路径。
++
++每个控制帧都引用 Session，并在三个判定点接受判定。开流 baseline 以 `'baseline'` 对 Session 列表逐 Session 判定一次，queues、jobs 和 projections 三个 record 因此共享同一键集合。实时 `queue`、`jobs` 和 `projection` 广播按帧自身的 type 逐流判定。`session/created` 通知产生的新 Session jobs 帧经过同一逐流判定。throw 的过滤器为该流丢弃该帧并 `logger.warn`（baseline throw 只排除那一个 Session），绝不中断广播循环或该流；席位未占用时，每条流收到的控制帧与未配置部署逐字节一致。
++
++`SESSION_CONTROLLER_SESSION_REFERENCES`（`remote-events` 子路径）为本包发出的 `api-session/*` 通知声明 Session 引用提取器：`api-session/added` 读取 summary 的 `sessionId` 字段，其余四个读取各自的第一个参数。Remote 装配把该表交给 Gateway 的转发事件注册项；参数形状属于本发射方，Gateway 因此不携带这些事件名。提取器对不匹配的参数返回 `undefined`，绝不 throw —— throw 的提取器会让整个事件源失败。
++
++-----
++
  <a id="configuration"></a>
  ## 配置
  
-@@ -61,6 +71,8 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用
+@@ -61,6 +83,8 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用
  - Control baseline 表示进程本地状态，因此 Host 重启后无法重建 jobs。
  - follow 恢复失败会对调用方可见，而不会无限重试。
  - 文件引用补全使用共享 Agent lookup，因此可能恢复冷 Session；`skills/list` 目录是不激活 Agent 的 skill 元数据读取路径。
@@ -496,6 +1450,147 @@ index 0000000000..fe468e397b
 +function forbidden(message: string, details: object): TypertRemoteFailure {
 +  return new TypertRemoteFailure({ code: 'forbidden', message, details })
 +}
+diff --git a/packages/api/session-controller/src/control.ts b/packages/api/session-controller/src/control.ts
+index 624c9a9493..06ad712101 100644
+--- a/packages/api/session-controller/src/control.ts
++++ b/packages/api/session-controller/src/control.ts
+@@ -1,6 +1,7 @@
+ /** Live Session queue, jobs, and projection state with reconnect baselines. */
+ 
+ import type { Context } from '@deepseek-ai/cordis'
++import { currentRequestPrincipal } from '@deepseek-ai/dsh-host-webserver'
+ import type { Agent } from '@deepseek-ai/dsh-agent'
+ import type { JobSnapshot } from '@deepseek-ai/dsh-jobs'
+ import type {
+@@ -9,15 +10,28 @@ import type {
+ import type {
+   SessionControlBaseline,
+   SessionControlFrame,
++  SessionControlFrameFilter,
++  SessionControlFrameFilterFactory,
++  SessionControlFrameType,
+   SessionJob,
+   SessionProjectionBaseline,
+   SessionProjectionValues,
+   SessionQueuedItem,
+ } from './types.ts'
+ 
++/** One live control stream generation: its queue and its open-time frame filter. */
++interface ControlStream {
++  readonly queue: ControlQueue
++  readonly filter: SessionControlFrameFilter | undefined
++}
++
++/** Broadcast frames; a generation's baseline is yielded directly and never broadcast. */
++type ControlBroadcastFrame = Exclude<SessionControlFrame, { readonly type: 'baseline' }>
++
+ /** Owns the Host-wide Session control stream. */
+ export class SessionControlController {
+-  private readonly streams = new Set<ControlQueue>()
++  private readonly streams = new Set<ControlStream>()
++  private frameFilterFactory: SessionControlFrameFilterFactory | undefined
+ 
+   /** @param ctx - Host context carrying live Agent, projection, and jobs services. */
+   constructor(private readonly ctx: Context) {
+@@ -41,11 +55,27 @@ export class SessionControlController {
+       if (jobs.length > 0) this.broadcast({ type: 'jobs', sessionId: session.id, jobs })
+     })
+     ctx.effect(() => () => {
+-      for (const stream of this.streams) stream.end()
++      for (const stream of this.streams) stream.queue.end()
+       this.streams.clear()
+     }, 'session-controller.control')
+   }
+ 
++  /**
++   * Claim the single control frame-filter seat: two filters cannot compose,
++   * so a second registration throws. Each stream generation receives the
++   * filter built when it opened; releasing the seat leaves later
++   * generations unfiltered.
++   * @param factory - builds one generation's filter from its open-time principal.
++   * @returns the disposer releasing the seat.
++   */
++  registerFrameFilter(factory: SessionControlFrameFilterFactory): () => void {
++    if (this.frameFilterFactory !== undefined) {
++      throw new Error('session-controller: control frame filter already registered')
++    }
++    this.frameFilterFactory = factory
++    return () => { this.frameFilterFactory = undefined }
++  }
++
+   /**
+    * Open one generation of Host-wide live control state.
+    * @param signal - Remote stream cancellation.
+@@ -53,19 +83,23 @@ export class SessionControlController {
+    */
+   async *control(signal: AbortSignal): AsyncIterable<SessionControlFrame> {
+     signal.throwIfAborted()
+-    const queue = new ControlQueue()
+-    this.streams.add(queue)
++    // Broadcast paths run outside any connection's request context, so the
++    // filter is built here, inside this generation's principal continuation.
++    const filter = this.frameFilterFactory?.(currentRequestPrincipal())
++    const stream: ControlStream = { queue: new ControlQueue(), filter }
++    this.streams.add(stream)
+     try {
+-      yield { type: 'baseline', value: this.baseline() }
+-      yield* queue.iterate(signal)
++      yield { type: 'baseline', value: this.baseline(filter) }
++      yield* stream.queue.iterate(signal)
+     } finally {
+-      this.streams.delete(queue)
+-      queue.end()
++      this.streams.delete(stream)
++      stream.queue.end()
+     }
+   }
+ 
+-  private baseline(): SessionControlBaseline {
++  private baseline(filter: SessionControlFrameFilter | undefined): SessionControlBaseline {
+     const sessions = this.ctx.sessions.list()
++      .filter(session => filter === undefined || this.admits(filter, session.id, 'baseline'))
+     const queues = Object.create(null) as Record<SessionId, readonly SessionQueuedItem[]>
+     const jobs = Object.create(null) as Record<SessionId, readonly SessionJob[]>
+     for (const session of sessions) {
+@@ -128,8 +162,36 @@ export class SessionControlController {
+     return jobs === undefined ? [] : jobs.list(agent).map(jobView)
+   }
+ 
+-  private broadcast(frame: SessionControlFrame): void {
+-    for (const stream of this.streams) stream.push(frame)
++  private broadcast(frame: ControlBroadcastFrame): void {
++    for (const stream of this.streams) {
++      if (stream.filter !== undefined && !this.admits(stream.filter, frame.sessionId, frame.type)) continue
++      stream.queue.push(frame)
++    }
++  }
++
++  /**
++   * Contained per-stream judgment for one session-referenced frame: a filter
++   * throw drops that frame for that stream with a warning (a baseline throw
++   * excludes that Session) instead of interrupting the broadcast loop or the
++   * stream.
++   * @param filter - the judging stream generation's filter.
++   * @param sessionId - Session the frame references.
++   * @param frameType - discriminant of the frame being judged.
++   * @returns whether the frame may enter the judging stream.
++   */
++  private admits(
++    filter: SessionControlFrameFilter,
++    sessionId: string,
++    frameType: SessionControlFrameType,
++  ): boolean {
++    try {
++      return filter(sessionId, frameType)
++    } catch (error) {
++      this.ctx.logger.warn(
++        `session-controller: control frame filter dropped one ${JSON.stringify(frameType)} frame for session ${JSON.stringify(sessionId)}: ${String(error)}`,
++      )
++      return false
++    }
+   }
+ }
+ 
 diff --git a/packages/api/session-controller/src/history.ts b/packages/api/session-controller/src/history.ts
 index d78509e49b..55e87cd5f6 100644
 --- a/packages/api/session-controller/src/history.ts
@@ -515,7 +1610,7 @@ index d78509e49b..55e87cd5f6 100644
  }
  
 diff --git a/packages/api/session-controller/src/index.ts b/packages/api/session-controller/src/index.ts
-index 342dd977eb..04482a912e 100644
+index 342dd977eb..302fa83e1a 100644
 --- a/packages/api/session-controller/src/index.ts
 +++ b/packages/api/session-controller/src/index.ts
 @@ -14,7 +14,8 @@ import {
@@ -528,15 +1623,18 @@ index 342dd977eb..04482a912e 100644
  import { SessionFileReferences } from './file-references.ts'
  import { ApiSessionList, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES } from './list.ts'
  import { buildModelCatalog } from './catalog.ts'
-@@ -29,6 +30,7 @@ import type {
+@@ -27,8 +28,10 @@ import type {
+   SessionCancelRequest,
+   SessionCancelValue,
    SessionControlFrame,
++  SessionControlFrameFilterFactory,
    SessionCreateRequest,
    SessionCreateValue,
 +  SessionFilterHooks,
    SessionFollowFrame,
    SessionFollowRequest,
    SessionForkRequest,
-@@ -99,6 +101,7 @@ export class SessionController extends TypertRemoteService {
+@@ -99,6 +102,7 @@ export class SessionController extends TypertRemoteService {
    })
  
    private readonly agents: ApiSessionAgentController
@@ -544,7 +1642,7 @@ index 342dd977eb..04482a912e 100644
    private readonly commands: SessionCommandController
    private readonly controlState: SessionControlController
    private readonly history: SessionHistoryController
-@@ -127,6 +130,7 @@ export class SessionController extends TypertRemoteService {
+@@ -127,6 +131,7 @@ export class SessionController extends TypertRemoteService {
        ctx,
        config.coldBlankProbeMaxBytes ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES,
      )
@@ -552,7 +1650,7 @@ index 342dd977eb..04482a912e 100644
      this.openPath = internals.openPath ?? openNativePath
      this.canOpenPath = internals.canOpenPath
        ?? (() => config.nativeOpen ?? (internals.openPath !== undefined || canOpenNativePath()))
-@@ -199,45 +203,78 @@ export class SessionController extends TypertRemoteService {
+@@ -199,45 +204,92 @@ export class SessionController extends TypertRemoteService {
      return inspectApiSession(this.ctx, sessionId, signal)
    }
  
@@ -565,6 +1663,20 @@ index 342dd977eb..04482a912e 100644
 +   */
 +  registerSessionFilter(hooks: SessionFilterHooks): () => void {
 +    return this.access.register(hooks)
++  }
++
++  /**
++   * Claim the single control frame-filter seat consulted by the
++   * `session/control` stream: each stream generation's filter is built by the
++   * factory when that generation opens, from the principal readable inside
++   * the open. A second registration throws because two filters cannot
++   * compose; with the seat unclaimed every stream receives control frames
++   * byte-identical to an unconfigured deployment.
++   * @param factory - builds one stream generation's filter from its open-time principal.
++   * @returns the disposer releasing the seat.
++   */
++  registerControlFrameFilter(factory: SessionControlFrameFilterFactory): () => void {
++    return this.controlState.registerFrameFilter(factory)
 +  }
 +
 +  /**
@@ -637,7 +1749,7 @@ index 342dd977eb..04482a912e 100644
      return this.commands.selectModel(request)
    }
  
-@@ -298,86 +335,106 @@ export class SessionController extends TypertRemoteService {
+@@ -298,86 +350,106 @@ export class SessionController extends TypertRemoteService {
  
    /**
     * Rename one Session after explicitly resuming it.
@@ -753,8 +1865,57 @@ index 342dd977eb..04482a912e 100644
    }
  
    /**
+diff --git a/packages/api/session-controller/src/remote-events.ts b/packages/api/session-controller/src/remote-events.ts
+index 94d194d72a..f46d1a29f5 100644
+--- a/packages/api/session-controller/src/remote-events.ts
++++ b/packages/api/session-controller/src/remote-events.ts
+@@ -7,6 +7,44 @@ export const SESSION_CONTROLLER_REMOTE_EVENTS = [
+   'api-session/status',
+ ] as const
+ 
++/**
++ * Extract the Session one forwarded api-session notification references.
++ * Local structural twin of the Gateway's extractor contract: this file
++ * compiles in both Host and Client faces and therefore imports nothing.
++ * @param args - forwarded event argument list.
++ * @returns the referenced Session id, or undefined when the arguments reference no Session.
++ */
++export type SessionControllerSessionReference = (args: readonly unknown[]) => string | undefined
++
++/** Read an api-session notification whose first argument names its Session directly. */
++const sessionIdArgument: SessionControllerSessionReference = args =>
++  typeof args[0] === 'string' ? args[0] : undefined
++
++/** Read api-session/added, whose first argument is a summary row carrying the Session id. */
++const summarySessionId: SessionControllerSessionReference = (args) => {
++  const summary = args[0]
++  if (typeof summary !== 'object' || summary === null) return undefined
++  const sessionId = (summary as { readonly sessionId?: unknown }).sessionId
++  return typeof sessionId === 'string' ? sessionId : undefined
++}
++
++/**
++ * Session-reference extractors for the api-session notifications this
++ * package emits, handed to the Gateway's forwarded-event registration by the
++ * Remote assembly: the argument shapes belong to this emitter, so the
++ * Gateway stays free of these event names. Extractors never throw —
++ * non-matching arguments are state frames and return undefined.
++ */
++export const SESSION_CONTROLLER_SESSION_REFERENCES: Readonly<
++  Record<(typeof SESSION_CONTROLLER_REMOTE_EVENTS)[number], SessionControllerSessionReference>
++> = {
++  'api-session/added': summarySessionId,
++  'api-session/removed': sessionIdArgument,
++  'api-session/status': sessionIdArgument,
++  'api-session/error': sessionIdArgument,
++  'api-session/activity': sessionIdArgument,
++}
++
+ declare module '@deepseek-ai/dsh-typert-protocol' {
+   interface TypertRemoteEventSelection extends
+     Record<typeof SESSION_CONTROLLER_REMOTE_EVENTS[number], true> {}
 diff --git a/packages/api/session-controller/src/types.ts b/packages/api/session-controller/src/types.ts
-index 167937e3d3..a11a070e50 100644
+index 167937e3d3..f7dca5f543 100644
 --- a/packages/api/session-controller/src/types.ts
 +++ b/packages/api/session-controller/src/types.ts
 @@ -168,6 +168,52 @@ export interface SessionSearchItem {
@@ -810,6 +1971,36 @@ index 167937e3d3..a11a070e50 100644
  /** Maximum number of Sessions returned by one search. */
  export const SESSION_SEARCH_RESULT_LIMIT = 20
  
+@@ -507,6 +553,29 @@ export type SessionControlFrame =
+   | { readonly type: 'jobs'; readonly sessionId: SessionId; readonly jobs: readonly SessionJob[] }
+   | ({ readonly type: 'projection' } & SessionProjectionUpdate)
+ 
++/** Discriminant of one control frame: a stream generation's baseline, or one live queue, jobs, or projection replacement. */
++export type SessionControlFrameType = SessionControlFrame['type']
++
++/**
++ * Judge one session-referenced control frame for one stream generation. The
++ * judgment is synchronous because baseline building and broadcast queue
++ * pushes run on synchronous paths.
++ * @param sessionId - Session the frame references; for a baseline judgment, one Session of the list.
++ * @param frameType - discriminant of the frame being judged.
++ * @returns whether the frame may enter this stream generation.
++ */
++export type SessionControlFrameFilter = (sessionId: string, frameType: SessionControlFrameType) => boolean
++
++/**
++ * Build one stream generation's control frame filter when its
++ * `session/control` stream opens, from the principal readable inside that
++ * open; broadcast paths run outside any connection's request context, so
++ * later judgments reuse this open-time value.
++ * @param principal - guard-supplied request principal, or undefined on carriers without one.
++ * @returns the filter judging every session-referenced frame of the new generation.
++ */
++export type SessionControlFrameFilterFactory = (principal: unknown) => SessionControlFrameFilter
++
+ declare module '@deepseek-ai/cordis' {
+   interface Events {
+     /**
 diff --git a/packages/api/session-controller/tests/access.host.spec.ts b/packages/api/session-controller/tests/access.host.spec.ts
 new file mode 100644
 index 0000000000..ebca2d019e
@@ -1339,6 +2530,360 @@ index 0000000000..ebca2d019e
 +      error: { code: 'forbidden', details: { sessionId: 'bypassed' } },
 +    })
 +    await ctx.fiber.dispose()
++  })
++})
+diff --git a/packages/api/session-controller/tests/control-filter.host.spec.ts b/packages/api/session-controller/tests/control-filter.host.spec.ts
+new file mode 100644
+index 0000000000..97e463a16b
+--- /dev/null
++++ b/packages/api/session-controller/tests/control-filter.host.spec.ts
+@@ -0,0 +1,348 @@
++/**
++ * Control frame filter seat: seat lifecycle, baseline Session-list
++ * filtering, per-stream judgment of live queue, jobs, and projection
++ * broadcasts, jobs frames for Sessions created after open, principal
++ * passthrough, fail-closed filter throws, and the api-session
++ * reference-extraction table.
++ */
++
++import { Context } from '@deepseek-ai/cordis'
++import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
++import type { Agent } from '@deepseek-ai/dsh-agent'
++import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
++import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
++import { runWithRequestPrincipal } from '@deepseek-ai/dsh-host-webserver'
++import { createUserMessage } from '@deepseek-ai/dsh-llm'
++import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
++import type { Session } from '@deepseek-ai/dsh-session'
++import { describe, expect, it, vi } from 'vitest'
++import type { SessionController } from '../src/index.ts'
++import { SESSION_CONTROLLER_SESSION_REFERENCES } from '../src/remote-events.ts'
++import type { SessionControlFrame } from '../src/types.ts'
++import {
++  createSessionTestController,
++  createSessionTestRemote,
++  type TestSessionRemote,
++} from './test-remote.ts'
++
++const VISIBLE = SessionId('visible-session')
++const INVISIBLE = SessionId('invisible-session')
++type BaselineFrame = Extract<SessionControlFrame, { type: 'baseline' }>
++
++function message(text: string) {
++  return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
++}
++
++function producer(label: string) {
++  const spec = {
++    kind: 'bash' as const,
++    label,
++    run: () => ({
++      cancel: () => {},
++      done: new Promise<JobOutcome>(() => {}),
++      readOutput: () => 'stolen output',
++    }),
++  }
++  return spec
++}
++
++interface LiveSession {
++  readonly session: Session
++  readonly agent: Agent
++  readonly inbox: Inbox
++}
++
++interface Bench {
++  readonly ctx: Context
++  readonly controller: SessionController
++  readonly remote: TestSessionRemote
++  readonly visible: LiveSession
++  readonly invisible: LiveSession
++}
++
++async function boot(): Promise<Bench> {
++  const ctx = new Context()
++  await ctx.plugin(SessionStore)
++  await ctx.plugin(AgentRegistry)
++  await ctx.plugin(LocalJobRegistry)
++  ctx.jobs.attachController('control-filter-test')
++  const live = (id: SessionId): LiveSession => {
++    const session = ctx.sessions.create(id, { meta: { cwd: '/tmp/control-filter' } })
++    const inbox = new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} })
++    const agent = { id, session, inbox, status: 'idle', ctx } as Agent
++    ctx.agents.register(agent)
++    return { session, agent, inbox }
++  }
++  const visible = live(VISIBLE)
++  const invisible = live(INVISIBLE)
++  const defaults = { defaultModelSelection: () => ({ provider: 'fixture', model: 'fixture-model' }), cwd: '/tmp/control-filter' }
++  const remote = createSessionTestRemote(ctx, defaults)
++  const controller = createSessionTestController(ctx, defaults)
++  // The controller's jobs and projections inject children activate asynchronously.
++  await new Promise(resolve => setTimeout(resolve, 0))
++  return { ctx, controller, remote, visible, invisible }
++}
++
++/** Read one complete baseline frame and close the generation. */
++async function baseline(remote: TestSessionRemote): Promise<BaselineFrame> {
++  const abort = new AbortController()
++  const iterator = remote.control(abort.signal)[Symbol.asyncIterator]()
++  const first = await iterator.next()
++  abort.abort()
++  await iterator.next()
++  if (first.done || first.value.type !== 'baseline') throw new Error('missing control baseline')
++  return first.value
++}
++
++/**
++ * One control stream generation drained continuously into a frame log; the
++ * single drain loop keeps every pushed frame ordered without competing pulls.
++ */
++class ControlRecorder {
++  private readonly collected: SessionControlFrame[] = []
++  private failure: unknown
++  private ended = false
++  private wake: (() => void) | undefined
++  private readonly abort = new AbortController()
++
++  constructor(remote: TestSessionRemote) {
++    void (async () => {
++      try {
++        for await (const frame of remote.control(this.abort.signal)) {
++          this.collected.push(frame)
++          this.flush()
++        }
++      } catch (error) {
++        this.failure = error
++        this.flush()
++      } finally {
++        this.ended = true
++        this.flush()
++      }
++    })()
++  }
++
++  private flush(): void {
++    const wake = this.wake
++    this.wake = undefined
++    wake?.()
++  }
++
++  /** Frames collected so far, the generation baseline first. */
++  get frames(): readonly SessionControlFrame[] {
++    return this.collected
++  }
++
++  /**
++   * Wait for one position in the frame log.
++   * @param index - frame position; 0 is the generation baseline.
++   * @returns the collected frame at that position.
++   */
++  async frame(index: number): Promise<SessionControlFrame> {
++    while (this.collected.length <= index) {
++      if (this.failure !== undefined) throw this.failure
++      if (this.ended) throw new Error('control stream ended before the expected frame')
++      await new Promise<void>((resolve) => { this.wake = resolve })
++    }
++    return this.collected[index] as SessionControlFrame
++  }
++
++  /** Assert no further frame is collected across two macrotask boundaries. */
++  async expectQuiet(): Promise<void> {
++    await new Promise(resolve => setTimeout(resolve, 0))
++    const before = this.collected.length
++    await new Promise(resolve => setTimeout(resolve, 0))
++    expect(this.collected.length).toBe(before)
++  }
++
++  /** End the generation and settle the drain loop. */
++  async close(): Promise<void> {
++    this.abort.abort()
++    while (!this.ended) await new Promise<void>((resolve) => { this.wake = resolve })
++  }
++}
++
++describe('session control frame filter', () => {
++  it('claims one seat, rejects a second registration, and restores unfiltered streams after release', async () => {
++    const { controller, remote } = await boot()
++    const release = controller.registerControlFrameFilter(() => sessionId => sessionId === VISIBLE)
++    expect(() => controller.registerControlFrameFilter(() => () => true))
++      .toThrow(/control frame filter already registered/)
++
++    const filtered = await baseline(remote)
++    expect(Object.keys(filtered.value.queues)).toEqual([String(VISIBLE)])
++
++    release()
++    const unfiltered = await baseline(remote)
++    expect(Object.keys(unfiltered.value.queues).sort())
++      .toEqual([String(INVISIBLE), String(VISIBLE)].sort())
++  })
++
++  it('filters the baseline Session list once and keeps admitted entries complete', async () => {
++    const { ctx, controller, remote, visible, invisible } = await boot()
++    visible.inbox.append('next-turn', message('visible queued'))
++    ctx.jobs.start({ ...producer('visible build'), owner: visible.agent })
++    invisible.inbox.append('next-turn', message('invisible queued'))
++    ctx.jobs.start({ ...producer('invisible build'), owner: invisible.agent })
++
++    const unfiltered = await baseline(remote)
++    expect(Object.keys(unfiltered.value.queues).sort())
++      .toEqual([String(INVISIBLE), String(VISIBLE)].sort())
++
++    const release = controller.registerControlFrameFilter(() => sessionId => sessionId === VISIBLE)
++    const filtered = await baseline(remote)
++    expect(Object.keys(filtered.value.queues)).toEqual([String(VISIBLE)])
++    expect(Object.keys(filtered.value.jobs)).toEqual([String(VISIBLE)])
++    expect(Object.keys(filtered.value.projections)).toEqual([String(VISIBLE)])
++    // Own-frame integrity: the admitted Session's entries deep-equal the unfiltered view.
++    expect(filtered.value.queues[VISIBLE]).toEqual(unfiltered.value.queues[VISIBLE])
++    expect(filtered.value.jobs[VISIBLE]).toEqual(unfiltered.value.jobs[VISIBLE])
++    expect(filtered.value.projections[VISIBLE]).toEqual(unfiltered.value.projections[VISIBLE])
++    release()
++  })
++
++  it('judges live queue, jobs, and projection broadcasts per stream and delivers admitted frames unchanged', async () => {
++    const { ctx, controller, remote, visible, invisible } = await boot()
++    const admitted = new ControlRecorder(remote)
++    await admitted.frame(0)
++    const release = controller.registerControlFrameFilter(() => sessionId => sessionId === VISIBLE)
++    const filtered = new ControlRecorder(remote)
++    await filtered.frame(0)
++
++    invisible.inbox.append('next-turn', message('invisible queued'))
++    expect(await admitted.frame(1)).toMatchObject({ type: 'queue', sessionId: INVISIBLE })
++    ctx.jobs.start({ ...producer('invisible job'), owner: invisible.agent })
++    expect(await admitted.frame(2)).toMatchObject({ type: 'jobs', sessionId: INVISIBLE })
++    invisible.session.append('user/message', message('invisible activity'), { surfaceOp: 'append' })
++    expect(await admitted.frame(3)).toMatchObject({ type: 'projection', sessionId: INVISIBLE })
++    await filtered.expectQuiet()
++    expect(filtered.frames).toHaveLength(1)
++
++    const queued = message('visible queued')
++    visible.inbox.append('next-turn', queued)
++    expect(await filtered.frame(1)).toEqual({
++      type: 'queue',
++      sessionId: VISIBLE,
++      items: [{
++        id: queued.id,
++        placement: 'queued',
++        message: { id: queued.id, content: [{ type: 'text', text: 'visible queued' }] },
++      }],
++    })
++
++    ctx.jobs.start({ ...producer('visible job'), owner: visible.agent })
++    const visibleJobs = await filtered.frame(2)
++    if (visibleJobs.type !== 'jobs') throw new Error('expected a jobs frame')
++    expect(visibleJobs.sessionId).toBe(VISIBLE)
++    expect(visibleJobs.jobs).toHaveLength(1)
++    expect({ ...visibleJobs.jobs[0], startedAt: 0 }).toEqual({
++      id: 'bash-2',
++      kind: 'bash',
++      label: 'visible job',
++      status: 'running',
++      startedAt: 0,
++    })
++
++    visible.session.append('user/message', message('visible activity'), { surfaceOp: 'append' })
++    const visibleProjection = await filtered.frame(3)
++    if (visibleProjection.type !== 'projection') throw new Error('expected a projection frame')
++    expect(visibleProjection.sessionId).toBe(VISIBLE)
++    expect(visibleProjection.key).toBe('sessionListMetadata')
++    expect(visibleProjection.value).toEqual({ blank: true, lastPromptAt: expect.any(Number) })
++    expect(visibleProjection.seq).toBe(visible.session.seq - 1)
++
++    await filtered.expectQuiet()
++    release()
++    await admitted.close()
++    await filtered.close()
++  })
++
++  it('judges jobs frames for Sessions created after the stream opened', async () => {
++    const { ctx, controller, remote } = await boot()
++    ctx.jobs.start(producer('open to every caller'))
++    const newVisible = SessionId('new-visible')
++    const release = controller.registerControlFrameFilter(() => sessionId => sessionId === newVisible)
++    const stream = new ControlRecorder(remote)
++    const opening = await stream.frame(0)
++    if (opening.type !== 'baseline') throw new Error('missing control baseline')
++    expect(Object.keys(opening.value.jobs)).toEqual([])
++
++    ctx.sessions.create(SessionId('new-invisible'))
++    await stream.expectQuiet()
++
++    ctx.sessions.create(newVisible)
++    const created = await stream.frame(1)
++    if (created.type !== 'jobs') throw new Error('expected a jobs frame for the new Session')
++    expect(created.sessionId).toBe(newVisible)
++    expect(created.jobs[0]).toMatchObject({ label: 'open to every caller', status: 'running' })
++    release()
++    await stream.close()
++  })
++
++  it('builds each stream filter from the request principal at open', async () => {
++    const { controller, remote } = await boot()
++    const received: unknown[] = []
++    const release = controller.registerControlFrameFilter((principal) => {
++      received.push(principal)
++      return () => true
++    })
++
++    const principal = { userId: 'u1' }
++    await runWithRequestPrincipal(principal, async () => {
++      const wrapped = new ControlRecorder(remote)
++      await wrapped.frame(0)
++      await wrapped.close()
++    })
++    expect(received).toEqual([principal])
++
++    const bare = new ControlRecorder(remote)
++    await bare.frame(0)
++    expect(received).toEqual([principal, undefined])
++    await bare.close()
++    release()
++  })
++
++  it('drops the frame with a warning when the filter throws and keeps the stream alive', async () => {
++    const { ctx, controller, remote, visible, invisible } = await boot()
++    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
++    const release = controller.registerControlFrameFilter(() => (sessionId) => {
++      if (sessionId === INVISIBLE) throw new Error('control filter fixture exploded')
++      return true
++    })
++
++    const opening = await baseline(remote)
++    expect(Object.keys(opening.value.queues)).toEqual([String(VISIBLE)])
++    const stream = new ControlRecorder(remote)
++    const streamOpening = await stream.frame(0)
++    if (streamOpening.type !== 'baseline') throw new Error('missing control baseline')
++    expect(Object.keys(streamOpening.value.queues)).toEqual([String(VISIBLE)])
++
++    invisible.inbox.append('next-turn', message('invisible queued'))
++    await stream.expectQuiet()
++
++    visible.inbox.append('next-turn', message('visible queued'))
++    expect(await stream.frame(1)).toMatchObject({ type: 'queue', sessionId: VISIBLE })
++
++    expect(warn.mock.calls.filter(call => String(call[0]).includes('control frame filter'))).toHaveLength(3)
++    release()
++    await stream.close()
++    warn.mockRestore()
++  })
++
++  it('extracts Session references from api-session notification arguments and never throws', () => {
++    const references = SESSION_CONTROLLER_SESSION_REFERENCES
++    expect(references['api-session/added']([{ sessionId: 's1', updatedAt: 1, running: false, blank: true }]))
++      .toBe('s1')
++    expect(references['api-session/removed'](['s2'])).toBe('s2')
++    expect(references['api-session/status'](['s2', true])).toBe('s2')
++    expect(references['api-session/error'](['s2', 'boom'])).toBe('s2')
++    expect(references['api-session/activity'](['s2', 123])).toBe('s2')
++
++    expect(references['api-session/added']([])).toBeUndefined()
++    expect(references['api-session/added'](['s1'])).toBeUndefined()
++    expect(references['api-session/added']([{ sessionId: 42 }])).toBeUndefined()
++    expect(references['api-session/removed']([])).toBeUndefined()
++    expect(references['api-session/removed']([42])).toBeUndefined()
++    expect(references['api-session/status']([null, true])).toBeUndefined()
 +  })
 +})
 diff --git a/packages/api/session-controller/tsconfig.host.json b/packages/api/session-controller/tsconfig.host.json
