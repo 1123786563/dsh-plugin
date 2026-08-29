@@ -27,13 +27,13 @@
  *     client bundle) with the web profile linked into $RT/dsh-home — the
  *     drill runs `pnpm dsh web --no-open` there itself.
  *
- * Private-port note: the natural env seam DSH_CASDOOR_DSH_PORT currently
- * yields a STRING port through the plugin's bundle patch (cordis.patch.yml
- * has no Number() coercion), which the webserver schema rejects at boot.
- * The drill therefore pins the private port numerically through the profile
- * user patch layer ($RT/dsh-home/profiles/web/cordis.patch.yml, applied
- * after every bundle layer) and leaves DSH_CASDOOR_DSH_PORT unset — same
- * isolated 38081 semantics, no file outside $RT touched.
+ * Private-port note: the drill pins the private port numerically through
+ * the profile user patch layer ($RT/dsh-home/profiles/web/cordis.patch.yml,
+ * applied after every bundle layer) for a deterministic isolated port it
+ * owns itself. The DSH_CASDOOR_DSH_PORT env seam is usable too (the bundle
+ * patch coerces it with Number()), but the drill leaves it unset so the
+ * isolated port never rides on env coordination — same isolated 38081
+ * semantics, no file outside $RT touched.
  *
  * Usage:
  *   node plugins/dsh-casdoor-auth/scripts/zero-trust-drill.mjs \
@@ -456,14 +456,13 @@ function startGateway (rt) {
 
 /** Spawn the isolated second dsh instance in the rehearsal worktree. */
 function startDsh (rt, hostWorktree, publicKeyPem, withGuard) {
-  // Numeric private port through the profile user patch layer: the bundle
-  // layer's env seam (DSH_CASDOOR_DSH_PORT) yields a string port the
-  // webserver schema rejects (see the header note). The user patch is
-  // applied after every bundle layer, so the literal wins.
+  // Numeric private port through the profile user patch layer: the drill
+  // owns its deterministic isolated port there (see the header note). The
+  // user patch is applied after every bundle layer, so the literal wins.
   const profilePatch = join(rt, 'dsh-home', 'profiles', 'web', 'cordis.patch.yml')
   writeFileSync(profilePatch, [
     '# written by zero-trust-drill.mjs: numeric private port 38081',
-    '# (DSH_CASDOOR_DSH_PORT through the bundle patch is a string the schema rejects)',
+    '# (drill-owned deterministic isolated port; DSH_CASDOOR_DSH_PORT stays unset)',
     '- id: webserver',
     '  config:',
     '    host: 127.0.0.1',

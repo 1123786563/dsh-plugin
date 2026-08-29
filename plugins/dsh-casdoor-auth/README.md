@@ -109,7 +109,7 @@ node plugins/dsh-casdoor-auth/scripts/zero-trust-drill.mjs \
 
 - `--rt` **必须**与上面 link 插件时的 `$RT` 同一目录（隔离 web profile 落在 `$RT/dsh-home`，脚本不重建它）。
 - drill 自起网关（`GATEWAY_IDENTITY_TTL_SEC=5` 压缩 fail-closed 等待）与 dsh 第二实例（`pnpm dsh web --no-open`，`DSH_CASDOOR_GUARD=1` + 钉公钥），结束自动杀尽子进程并 `rm -rf $RT`。
-- 私口 38081 由 drill 写入 profile 用户 patch 层（`$RT/dsh-home/profiles/web/cordis.patch.yml`，数值端口，在所有 bundle 层之后生效）：`cordis.patch.yml` 的 `DSH_CASDOOR_DSH_PORT` 环境通道目前产出字符串端口、被 webserver schema 拒绝（需补 `Number()` 强转，本任务文件清单外，留待修复）；drill 因此不设该环境变量。
+- 私口 38081 由 drill 写入 profile 用户 patch 层（`$RT/dsh-home/profiles/web/cordis.patch.yml`，数值端口，在所有 bundle 层之后生效）：drill 改走 profile 用户 patch 数值端口以获得确定隔离端口——`DSH_CASDOOR_DSH_PORT` env 通道已带 `Number()` 强转、同样可用，但隔离端口直接钉在隔离 profile 里不依赖 env 传递，drill 因此不设该环境变量。
 - 退出码 0 且末行 `ALL PASS`＝全部通过；任一步骤失败输出逐项 `❌` 并退出非零。`GET /manifest.webmanifest` 经网关匿名转发被守卫 401 为已知开放问题（见「已知边界」），仅记录不计失败。
 
 ### 清理（宿主零残留核验）
@@ -135,7 +135,7 @@ rm -rf "$RT"   # 泄漏时才存在；重跑前按「搭建」step 2 重新 link
 
 - **stock Web UI 无租户隔离**（上游 [issue #41](https://github.com/GuoMonth/dsh-multi-tenant/issues/41)）：登录后是共享工作区；租户隔离发生在 Agent 层（会话归属 claim-once + Principal 绑定）。
 - 本机进程直连 `38080` 绕过网关的旁路已由 zero-trust 私口守卫关闭（开启 `guardEnabled` 后，无有效凭证的直连一律 401；逃生门与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)）。
-- `manifest.webmanifest` 经网关匿名转发会被守卫 401：PWA 安装元数据失效，UI 不受影响（浏览器拉取 manifest 不带 cookie——W3C [Web Application Manifest](https://www.w3.org/TR/appmanifest/#fetching-a-manifest) 规定 manifest 请求以 credentials mode "omit" 发出，登录态亦然）；取消网关侧匿名转发特例属 #19 正文领地（开放问题）。
+- `manifest.webmanifest` 经网关匿名转发会被守卫 401：PWA 安装元数据失效，UI 不受影响（浏览器拉取 manifest 不带 cookie——HTML Standard [Link type "manifest"](https://html.spec.whatwg.org/multipage/links.html#link-type-manifest)：manifest link 无 `crossorigin` 属性时 credentials mode 为 "omit"（默认情形，dsh 正是如此），登录态亦不带 cookie）；取消网关侧匿名转发特例属 #19 正文领地（开放问题）。
 - 特权方法（settings/credentials/agentPreset 等 15 个）在网关层要求 casdoor 角色 `dsh-admin`。
 
 ## 文档
