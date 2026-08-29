@@ -1,5 +1,1368 @@
+diff --git a/packages/api/gateway/src/index.ts b/packages/api/gateway/src/index.ts
+index 1d754b05a7..04a4db288c 100644
+--- a/packages/api/gateway/src/index.ts
++++ b/packages/api/gateway/src/index.ts
+@@ -8,6 +8,7 @@
+ import { randomUUID } from 'node:crypto'
+ import { Context, Service, symbols } from '@deepseek-ai/cordis'
+ import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
++import { runWithRequestPrincipal } from '@deepseek-ai/dsh-host-webserver'
+ import type { WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
+ import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
+ import z from '@deepseek-ai/schemastery'
+@@ -221,7 +222,13 @@ export class TypertGatewayService extends Service implements TypertGateway {
+               rejectRemoteStreamUpgrade(socket, rejection)
+               return
+             }
+-            mux.handleUpgrade(req, socket, head)
++            // The webserver's upgrade-time wrap cannot reach post-upgrade
++            // frames (socket listeners fire in the native read context), so
++            // the guard principal re-enters around every received message.
++            const principal = webCtx.webServer.principalOf(req)
++            mux.handleUpgrade(req, socket, head, principal === undefined
++              ? undefined
++              : run => runWithRequestPrincipal(principal, run))
+           },
+         }
+         const unregister = webCtx.webServer.registerUpgrade(route)
+diff --git a/packages/api/gateway/src/stream-server.ts b/packages/api/gateway/src/stream-server.ts
+index 28a3589542..a149e7f279 100644
+--- a/packages/api/gateway/src/stream-server.ts
++++ b/packages/api/gateway/src/stream-server.ts
+@@ -19,6 +19,16 @@ export type RemoteStreamOpener = (
+ /** Convert an invocation or carrier failure to a stable wire value. */
+ export type RemoteStreamFailureMapper = (error: unknown) => RemoteStreamFailure
+ 
++/**
++ * Re-establish one captured execution scope around every message a carrier
++ * connection delivers. Post-upgrade WebSocket frames fire their listeners in
++ * the socket's native read context, so registration-time async context (the
++ * webserver's request-principal store) never reaches them without re-entry.
++ */
++export type RemoteStreamScope = <T>(run: () => T) => T
++
++const identityScope: RemoteStreamScope = run => run()
++
+ /** Own the no-server WebSocket acceptor and every active logical stream. */
+ export class RemoteStreamMuxServer {
+   private readonly server = new WebSocketServer({ noServer: true })
+@@ -41,11 +51,17 @@ export class RemoteStreamMuxServer {
+    * @param req - authenticated HTTP upgrade request.
+    * @param socket - carrier socket transferred to the WebSocket server.
+    * @param head - bytes already read after the HTTP upgrade headers.
++   * @param scope - execution scope re-entered for every message this carrier delivers.
+    */
+-  handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
++  handleUpgrade(
++    req: IncomingMessage,
++    socket: Duplex,
++    head: Buffer,
++    scope?: RemoteStreamScope,
++  ): void {
+     this.server.handleUpgrade(req, socket, head, (websocket) => {
+       this.startHeartbeat()
+-      const connection = new RemoteStreamMuxConnection(websocket, this.open, this.failure)
++      const connection = new RemoteStreamMuxConnection(websocket, this.open, this.failure, scope ?? identityScope)
+       const done = connection.run()
+       this.connections.add(done)
+       void done.then(() => { this.connections.delete(done) })
+@@ -91,6 +107,7 @@ class RemoteStreamMuxConnection {
+     private readonly socket: WebSocket,
+     private readonly open: RemoteStreamOpener,
+     private readonly failure: RemoteStreamFailureMapper,
++    private readonly scope: RemoteStreamScope,
+   ) {}
+ 
+   async run(): Promise<void> {
+@@ -103,7 +120,7 @@ class RemoteStreamMuxConnection {
+           return
+         }
+         try {
+-          this.receive(rawText(data))
++          this.scope(() => this.receive(rawText(data)))
+         } catch {
+           this.socket.close(1008, 'invalid Remote stream request')
+         }
+diff --git a/packages/api/gateway/tests/request-principal.host.spec.ts b/packages/api/gateway/tests/request-principal.host.spec.ts
+new file mode 100644
+index 0000000000..6d31d4bfdb
+--- /dev/null
++++ b/packages/api/gateway/tests/request-principal.host.spec.ts
+@@ -0,0 +1,162 @@
++/** End-to-end proof that the guard principal reaches Remote domain methods on both carriers. */
++
++import { once } from 'node:events'
++import { Context, Service } from '@deepseek-ai/cordis'
++import {
++  apply as applyConnection,
++  inject as connectionInject,
++  type HostConnectionHandle,
++} from '@deepseek-ai/dsh-client-connection'
++import WebServer, { currentRequestPrincipal } from '@deepseek-ai/dsh-host-webserver'
++import { bindTypertRemote, Remote } from '@deepseek-ai/dsh-typert-protocol'
++import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
++import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
++import WebSocket, { type RawData } from 'ws'
++import { describe, expect, it } from 'vitest'
++import { provideBrowserCredentials } from './browser-credentials.ts'
++
++class PrincipalEchoService extends Service {
++  readonly typertRemote = bindTypertRemote(this, 'principalEcho')
++
++  constructor(ctx: Context) {
++    super(ctx, 'principalEcho')
++  }
++
++  @Remote
++  read(): unknown {
++    return { principal: currentRequestPrincipal() }
++  }
++
++  @Remote({ mode: 'stream' })
++  async *frames(): AsyncIterable<unknown> {
++    yield { principal: currentRequestPrincipal() }
++  }
++}
++
++/** Composition under proof: the real WebServer, Connection bridge, and Gateway dispatch. */
++async function boot(): Promise<{
++  readonly ctx: Context
++  readonly port: number
++  readonly cookie: string
++  readonly dispose: () => Promise<void>
++}> {
++  const ctx = new Context()
++  provideBrowserCredentials(ctx)
++  const serverFiber = ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
++  await serverFiber
++  const connectionFiber = ctx.plugin({ inject: [...connectionInject], apply: applyConnection })
++  await connectionFiber
++  await ctx.plugin(TypertRegistry)
++  const gatewayFiber = ctx.plugin(TypertGatewayService)
++  await gatewayFiber
++  const echoFiber = ctx.plugin(PrincipalEchoService)
++  await echoFiber
++  const origin = `http://127.0.0.1:${String(ctx.webServer.port)}`
++  return {
++    ctx,
++    port: ctx.webServer.port,
++    cookie: browserCookie(ctx.connection, origin),
++    dispose: async () => {
++      await echoFiber.dispose()
++      await gatewayFiber.dispose()
++      await connectionFiber.dispose()
++      await serverFiber.dispose()
++    },
++  }
++}
++
++/** Exchange a Connection launch token without mounting the frontend fallback. */
++function browserCookie(connection: HostConnectionHandle, origin: string): string {
++  const target = new URL(connection.authenticatedUrl(origin))
++  let setCookie: string | undefined
++  connection.authorizeIndex({
++    method: 'GET',
++    url: `${target.pathname}${target.search}`,
++    headers: { host: target.host },
++  }, {
++    writeHead(_status, headers) { setCookie = headers?.['set-cookie'] },
++    end() {},
++  })
++  if (setCookie === undefined) throw new Error('principal fixture did not receive an authentication cookie')
++  return setCookie.split(';', 1)[0]!
++}
++
++/** POST one unary principalEcho/read call and return the decoded response body. */
++async function postRead(port: number, cookie: string, rpcId: string): Promise<unknown> {
++  const response = await fetch(`http://127.0.0.1:${String(port)}/api/principalEcho/read`, {
++    method: 'POST',
++    headers: { 'content-type': 'application/json', cookie },
++    body: JSON.stringify({
++      type: 'client-request', rpcId, method: 'principalEcho/read', payload: { args: {} },
++    }),
++  })
++  expect(response.status).toBe(200)
++  return response.json()
++}
++
++/** Open the mux, request one principalEcho/frames item, and return the first frame. */
++async function firstItemFrame(port: number, cookie: string): Promise<unknown> {
++  const socket = new WebSocket(`ws://127.0.0.1:${String(port)}/api/remote.mux`, { headers: { cookie } })
++  await once(socket, 'open')
++  socket.send(JSON.stringify({
++    type: 'open', streamId: 's1', endpoint: 'principalEcho/frames', payload: { args: {} },
++  }))
++  const [frame] = await once(socket, 'message')
++  const parsed = JSON.parse(rawText(frame as RawData))
++  socket.close()
++  await once(socket, 'close')
++  return parsed
++}
++
++function rawText(data: RawData): string {
++  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8')
++  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8')
++  return Buffer.from(data).toString('utf8')
++}
++
++describe('request principal propagation', () => {
++  it('reaches a unary Remote method through the real /api HTTP chain', { timeout: 20_000 }, async () => {
++    const { ctx, port, cookie, dispose } = await boot()
++    const release = ctx.webServer.registerGuard(() => ({ allow: true, principal: { userId: 'e2e-http' } }))
++    try {
++      await expect(postRead(port, cookie, 'rpc-principal')).resolves.toEqual({
++        type: 'server-response', rpcId: 'rpc-principal',
++        result: { ok: true, value: { principal: { userId: 'e2e-http' } } },
++      })
++    } finally {
++      release()
++      await dispose()
++    }
++  })
++
++  it('reaches a stream Remote method through the real WebSocket mux', { timeout: 20_000 }, async () => {
++    const { ctx, port, cookie, dispose } = await boot()
++    const release = ctx.webServer.registerGuard((_req, kind) =>
++      kind === 'upgrade' ? { allow: true, principal: { userId: 'e2e-ws' } } : { allow: true })
++    try {
++      await expect(firstItemFrame(port, cookie)).resolves.toEqual({
++        type: 'item', streamId: 's1', value: { principal: { userId: 'e2e-ws' } },
++      })
++    } finally {
++      release()
++      await dispose()
++    }
++  })
++
++  it('reports undefined without a guard principal on both carriers', { timeout: 20_000 }, async () => {
++    const { port, cookie, dispose } = await boot()
++    try {
++      // No guard is registered: the reader reports undefined, and JSON
++      // transport drops the undefined principal member from the value.
++      await expect(postRead(port, cookie, 'rpc-absent')).resolves.toEqual({
++        type: 'server-response', rpcId: 'rpc-absent',
++        result: { ok: true, value: {} },
++      })
++      await expect(firstItemFrame(port, cookie)).resolves.toEqual({
++        type: 'item', streamId: 's1', value: {},
++      })
++    } finally {
++      await dispose()
++    }
++  })
++})
+diff --git a/packages/api/session-controller/README.i18n.yaml b/packages/api/session-controller/README.i18n.yaml
+index fc66cdfceb..23535d686d 100644
+--- a/packages/api/session-controller/README.i18n.yaml
++++ b/packages/api/session-controller/README.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write packages/api/session-controller/README.md
+-README.md: 689635b83bce71e3aecfedf371685a24bede55ab
+-README.zh.md: 68da7db60b38aca1b72c991005438ced45b348ea
++README.md: 0e9dd61d64e6cf4d7853d94ac2bce96ca948dd2b
++README.zh.md: f709a381e333861f0d024311cd6f925080648e05
+diff --git a/packages/api/session-controller/README.md b/packages/api/session-controller/README.md
+index 689635b83b..0e9dd61d64 100644
+--- a/packages/api/session-controller/README.md
++++ b/packages/api/session-controller/README.md
+@@ -13,6 +13,7 @@ English | [中文](README.zh.md)
+ ## Table of Contents
+ 
+ - [Use this package](#use-this-package)
++- [The session filter seat](#the-session-filter-seat)
+ - [Configuration](#configuration)
+ - [Model Experience](#model-experience)
+ - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
+@@ -33,6 +34,15 @@ The Session object also carries local submission echoes: `session.beginSubmissio
+ 
+ -----
+ 
++<a id="the-session-filter-seat"></a>
++## The session filter seat
++
++`ctx.sessionController.registerSessionFilter(hooks)` claims the single seat of optional session access hooks: a second registration throws because two access policies cannot compose, and the returned disposer releases the seat. Each callback is independent, and an absent callback leaves its seam byte-identical to an unconfigured deployment. `listFilter(principal, items)` rewrites the rows of `list` and the items of `search`; the generic preserves each item type, so summaries and search hits keep their own fields. `accessCheck(principal, sessionId)` admits every Session-addressed method: prompt, cancel, rename, selectModel, attachment, updateQueue, page, fork sources, and follow openings (a subagent address is checked against the child Session it names). `onSessionCreated(principal, sessionId)` is awaited after each successful create or fork, so its claims settle before the response; its rejection is logged and never fails the settled response.
++
++The principal is the request-scoped identity the webserver guard attached to the current request, opaque to the Host. With the matching callback registered, a request without a principal is denied, and a hook that denies or throws is a denial (`logger.warn` on a throw); an anonymous create is rejected before any creation side effect. Every denial is a `TypertRemoteFailure` with the stable code `forbidden`, passed through unchanged by every carrier and consumed by clients with HTTP 403 semantics, plus `{ sessionId }` details where a Session is addressed. `search.hasMore` still describes the provider page before filtering, never the filtered view. `ctx.sessionController.assertSessionAccess(sessionId)` exposes the same admission verdict for any future direct route that addresses a Session.
++
++-----
++
+ <a id="configuration"></a>
+ ## Configuration
+ 
+@@ -61,6 +71,8 @@ No direct effect; model requests remain owned by the Agent and LLM packages.
+ - Control baselines represent process-local state and therefore cannot reconstruct jobs after a Host restart.
+ - A failed follow resumption remains visible to the caller instead of retrying indefinitely.
+ - File-reference completion uses the shared Agent lookup and can resume a cold Session; the `skills/list` catalog is the non-activating alternative for skill metadata.
++- The `skills` and `fileReferences` Remote namespaces are not wired to the session filter seat; a consumer that needs coverage there calls `assertSessionAccess` with the addressed Session identity.
++- Denials carry the stable code `forbidden`, which `RpcErrorDetailsMap` in `@deepseek-ai/dsh-client-connection` does not type yet; the typed client mapping lands with its first consuming change.
+ 
+ 
+ <a id="dev-note"></a>
+diff --git a/packages/api/session-controller/README.zh.md b/packages/api/session-controller/README.zh.md
+index 68da7db60b..f709a381e3 100644
+--- a/packages/api/session-controller/README.zh.md
++++ b/packages/api/session-controller/README.zh.md
+@@ -13,6 +13,7 @@ kind: "package-reference"
+ ## 目录
+ 
+ - [使用本包](#use-this-package)
++- [Session 过滤席位](#the-session-filter-seat)
+ - [配置](#configuration)
+ - [模型体验](#model-experience)
+ - [已知限制与延期工作](#known-limitations-and-deferred-work)
+@@ -33,6 +34,15 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用
+ 
+ -----
+ 
++<a id="the-session-filter-seat"></a>
++## Session 过滤席位
++
++`ctx.sessionController.registerSessionFilter(hooks)` 占据唯一的可选 Session 访问钩子席位：第二次注册会 throw，因为两个访问策略无法组合；返回的 disposer 释放该席位。三个回调彼此独立，缺席的回调让其接线面与未配置部署逐字节一致。`listFilter(principal, items)` 改写 `list` 的行与 `search` 的 items；泛型保留各自的 item 类型，summary 与搜索命中因此保有自己的字段。`accessCheck(principal, sessionId)` 为全部按 Session 寻址的方法做准入：prompt、cancel、rename、selectModel、attachment、updateQueue、page、fork 源与 follow 开流（subagent address 按其命名的子 Session 判定）。`onSessionCreated(principal, sessionId)` 在每次成功的 create 或 fork 之后被 await，其 claim 因此先于响应落定；它的 rejection 只记录日志，绝不让已落定的响应失败。
++
++principal 是 webserver guard 附加到当前请求的请求级身份，对 Host 不透明。对应回调在场时，无 principal 的请求被拒绝，拒绝或 throw 的钩子同样视为拒绝（throw 时 `logger.warn`）；匿名 create 在任何创建副作用之前被拒绝。所有拒绝都是稳定失败码 `forbidden` 的 `TypertRemoteFailure`，由所有载体原样透传、客户端按 HTTP 403 语义消费；寻址 Session 时附带 `{ sessionId }` details。`search.hasMore` 始终描述过滤前的 provider 分页，绝不描述过滤后的视图。`ctx.sessionController.assertSessionAccess(sessionId)` 为未来任意直达 Session 的路由暴露同一准入判定。
++
++-----
++
+ <a id="configuration"></a>
+ ## 配置
+ 
+@@ -61,6 +71,8 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用
+ - Control baseline 表示进程本地状态，因此 Host 重启后无法重建 jobs。
+ - follow 恢复失败会对调用方可见，而不会无限重试。
+ - 文件引用补全使用共享 Agent lookup，因此可能恢复冷 Session；`skills/list` 目录是不激活 Agent 的 skill 元数据读取路径。
++- `skills` 与 `fileReferences` Remote namespace 未接线到 Session 过滤席位；需要覆盖的消费方用被寻址的 Session 身份调用 `assertSessionAccess`。
++- 拒绝携带稳定失败码 `forbidden`，`@deepseek-ai/dsh-client-connection` 的 `RpcErrorDetailsMap` 尚未为其建模；类型化 client 映射随首个消费变更补齐。
+ 
+ 
+ <a id="dev-note"></a>
+diff --git a/packages/api/session-controller/package.json b/packages/api/session-controller/package.json
+index 4aa30bd9e4..3e0758c86a 100644
+--- a/packages/api/session-controller/package.json
++++ b/packages/api/session-controller/package.json
+@@ -86,6 +86,7 @@
+     "@deepseek-ai/dsh-brand": "workspace:^",
+     "@deepseek-ai/dsh-client-connection": "workspace:^",
+     "@deepseek-ai/dsh-file-reference": "workspace:^",
++    "@deepseek-ai/dsh-host-webserver": "workspace:^",
+     "@deepseek-ai/dsh-invariants": "workspace:^",
+     "@deepseek-ai/dsh-jobs": "workspace:^",
+     "@deepseek-ai/dsh-llm": "workspace:^",
+@@ -120,6 +121,7 @@
+     "@deepseek-ai/dsh-client-connection": "workspace:^",
+     "@deepseek-ai/dsh-client-store": "workspace:^",
+     "@deepseek-ai/dsh-file-reference": "workspace:^",
++    "@deepseek-ai/dsh-host-webserver": "workspace:^",
+     "@deepseek-ai/dsh-invariants": "workspace:^",
+     "@deepseek-ai/dsh-jobs": "workspace:^",
+     "@deepseek-ai/dsh-llm": "workspace:^",
+diff --git a/packages/api/session-controller/src/access.ts b/packages/api/session-controller/src/access.ts
+new file mode 100644
+index 0000000000..fe468e397b
+--- /dev/null
++++ b/packages/api/session-controller/src/access.ts
+@@ -0,0 +1,133 @@
++/** Session admission and list filtering driven by one optional external hook set. */
++
++import type { Context } from '@deepseek-ai/cordis'
++import { currentRequestPrincipal } from '@deepseek-ai/dsh-host-webserver'
++import type { SessionId } from '@deepseek-ai/dsh-session'
++import { TypertRemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
++import type { SessionFilterHooks, SessionListItem } from './types.ts'
++
++/** Single seat of session access hooks consulted by the Session Remote methods. */
++export class SessionAccessPolicy {
++  private hooks: SessionFilterHooks | undefined
++
++  /**
++   * @param ctx - owning Session Controller context; used for contained hook-failure warnings.
++   */
++  constructor(private readonly ctx: Context) {}
++
++  /**
++   * Claim the single session-hook seat: two access policies cannot compose,
++   * so a second registration throws. Release with the returned disposer.
++   * @param hooks - optional list, admission, and creation callbacks.
++   * @returns the disposer releasing the seat.
++   */
++  register(hooks: SessionFilterHooks): () => void {
++    if (this.hooks !== undefined) {
++      throw new Error('session-controller: session filter hooks already registered')
++    }
++    this.hooks = hooks
++    return () => { this.hooks = undefined }
++  }
++
++  /**
++   * The reusable admission judgment for one Session, shared by every
++   * sessionId-bearing Remote method and any future direct route: allow when
++   * no accessCheck hook is registered; deny fail-closed when the hook is
++   * registered but the request carries no principal, the hook denies, or the
++   * hook throws (a throwing hook is logged and counted as a denial).
++   * @param sessionId - addressed durable Session identity.
++   * @throws TypertRemoteFailure code `forbidden` (HTTP 403 semantics) on denial.
++   */
++  async assertSessionAccess(sessionId: SessionId): Promise<void> {
++    const check = this.hooks?.accessCheck
++    if (check === undefined) return
++    const principal = currentRequestPrincipal()
++    if (principal === undefined) throw forbidden(`access to session "${sessionId}" was denied`, { sessionId })
++    try {
++      if (!await check(principal, sessionId)) {
++        throw forbidden(`access to session "${sessionId}" was denied`, { sessionId })
++      }
++    } catch (error) {
++      if (error instanceof TypertRemoteFailure) throw error
++      this.ctx.logger.warn(
++        `session-controller: accessCheck for "${sessionId}" threw and was treated as a denial: ${String(error)}`,
++      )
++      throw forbidden(`access to session "${sessionId}" was denied`, { sessionId })
++    }
++  }
++
++  /**
++   * Apply the registered list filter to one list or search response outlet;
++   * absent filter returns the items unchanged, a principal-less request or a
++   * throwing filter denies the whole call fail-closed.
++   * @param items - complete response items.
++   * @returns the filtered items.
++   * @throws TypertRemoteFailure code `forbidden` on denial.
++   */
++  async applyListFilter<Item extends SessionListItem>(items: readonly Item[]): Promise<readonly Item[]> {
++    const filter = this.hooks?.listFilter
++    if (filter === undefined) return items
++    const principal = currentRequestPrincipal()
++    if (principal === undefined) throw forbidden('session list access was denied', {})
++    try {
++      return await filter(principal, items)
++    } catch (error) {
++      this.ctx.logger.warn(
++        `session-controller: listFilter threw and was treated as a denial: ${String(error)}`,
++      )
++      throw forbidden('session list access was denied', {})
++    }
++  }
++
++  /**
++   * Require a principal before any creation side effect whenever creation is
++   * observed: an anonymous create would mint a Session no observer can claim.
++   * @throws TypertRemoteFailure code `forbidden` when the observer is registered and no principal is present.
++   */
++  assertCreationAdmission(): void {
++    if (this.hooks?.onSessionCreated === undefined) return
++    if (currentRequestPrincipal() === undefined) {
++      throw forbidden('session creation was denied', {})
++    }
++  }
++
++  /**
++   * Notify the creation observer after one successful create or fork; the
++   * callback is awaited (its claims settle before the response) and its
++   * rejection is logged, never failing the settled response.
++   * @param sessionId - newly created (or forked) Session identity.
++   */
++  async sessionCreated(sessionId: SessionId): Promise<void> {
++    const notify = this.hooks?.onSessionCreated
++    if (notify === undefined) return
++    const principal = currentRequestPrincipal()
++    if (principal === undefined) {
++      // Only reachable without a matching assertCreationAdmission call.
++      this.ctx.logger.warn(`session-controller: created "${sessionId}" without a request principal; observer skipped`)
++      return
++    }
++    try {
++      await notify(principal, sessionId)
++    } catch (error) {
++      this.ctx.logger.warn(
++        `session-controller: onSessionCreated for "${sessionId}" failed: ${String(error)}`,
++      )
++    }
++  }
++
++  /**
++   * Admit one stream before its first frame: the judgment runs on first pull,
++   * so a denial rejects the stream before any snapshot frame is produced.
++   * @param sessionId - addressed durable Session identity.
++   * @param source - the unstarted stream.
++   * @returns the admitted stream.
++   */
++  async *admittedStream<Frame>(sessionId: SessionId, source: AsyncIterable<Frame>): AsyncIterable<Frame> {
++    await this.assertSessionAccess(sessionId)
++    yield* source
++  }
++}
++
++function forbidden(message: string, details: object): TypertRemoteFailure {
++  return new TypertRemoteFailure({ code: 'forbidden', message, details })
++}
+diff --git a/packages/api/session-controller/src/history.ts b/packages/api/session-controller/src/history.ts
+index d78509e49b..55e87cd5f6 100644
+--- a/packages/api/session-controller/src/history.ts
++++ b/packages/api/session-controller/src/history.ts
+@@ -230,7 +230,12 @@ function validateFollowRequest(request: SessionFollowRequest): void {
+   }
+ }
+ 
+-function addressId(address: SessionAddress): SessionId {
++/**
++ * The durable Session identity one address names.
++ * @param address - ordinary or direct-subagent durable address.
++ * @returns the Session identity the address names.
++ */
++export function addressId(address: SessionAddress): SessionId {
+   return address.kind === 'session' ? address.sessionId : address.childSessionId
+ }
+ 
+diff --git a/packages/api/session-controller/src/index.ts b/packages/api/session-controller/src/index.ts
+index 342dd977eb..04482a912e 100644
+--- a/packages/api/session-controller/src/index.ts
++++ b/packages/api/session-controller/src/index.ts
+@@ -14,7 +14,8 @@ import {
+ } from './agent.ts'
+ import { SessionCommandController } from './commands.ts'
+ import { SessionControlController } from './control.ts'
+-import { SessionHistoryController } from './history.ts'
++import { SessionAccessPolicy } from './access.ts'
++import { SessionHistoryController, addressId } from './history.ts'
+ import { SessionFileReferences } from './file-references.ts'
+ import { ApiSessionList, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES } from './list.ts'
+ import { buildModelCatalog } from './catalog.ts'
+@@ -29,6 +30,7 @@ import type {
+   SessionControlFrame,
+   SessionCreateRequest,
+   SessionCreateValue,
++  SessionFilterHooks,
+   SessionFollowFrame,
+   SessionFollowRequest,
+   SessionForkRequest,
+@@ -99,6 +101,7 @@ export class SessionController extends TypertRemoteService {
+   })
+ 
+   private readonly agents: ApiSessionAgentController
++  private readonly access: SessionAccessPolicy
+   private readonly commands: SessionCommandController
+   private readonly controlState: SessionControlController
+   private readonly history: SessionHistoryController
+@@ -127,6 +130,7 @@ export class SessionController extends TypertRemoteService {
+       ctx,
+       config.coldBlankProbeMaxBytes ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES,
+     )
++    this.access = new SessionAccessPolicy(ctx)
+     this.openPath = internals.openPath ?? openNativePath
+     this.canOpenPath = internals.canOpenPath
+       ?? (() => config.nativeOpen ?? (internals.openPath !== undefined || canOpenNativePath()))
+@@ -199,45 +203,78 @@ export class SessionController extends TypertRemoteService {
+     return inspectApiSession(this.ctx, sessionId, signal)
+   }
+ 
++  /**
++   * Claim the single session-hook seat: optional list, admission, and creation
++   * callbacks consulted by the Session Remote methods. A second registration
++   * throws because two access policies cannot compose.
++   * @param hooks - listFilter, accessCheck, and onSessionCreated callbacks.
++   * @returns the disposer releasing the seat.
++   */
++  registerSessionFilter(hooks: SessionFilterHooks): () => void {
++    return this.access.register(hooks)
++  }
++
++  /**
++   * The reusable admission judgment behind every sessionId-bearing Remote
++   * method: any future direct route addressing a Session consumes the same
++   * verdict (fail-closed `forbidden`).
++   * @param sessionId - addressed durable Session identity.
++   * @throws TypertRemoteFailure code `forbidden` on denial.
++   */
++  assertSessionAccess(sessionId: SessionId): Promise<void> {
++    return this.access.assertSessionAccess(sessionId)
++  }
++
+   /**
+    * Read all visible Session rows without resuming an Agent.
++   * The registered list filter rewrites the returned rows for the request principal.
+    * @param _request - reserved empty list request.
+    * @param signal - cancellation for persistence reads.
+    * @returns visible Session summaries ordered by activity.
+    */
+   @Remote('list')
+   async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue> {
+-    return { items: await this.listState.list(signal) }
++    return { items: await this.access.applyListFilter(await this.listState.list(signal)) }
+   }
+ 
+   /**
+    * Search visible Session content without resuming an Agent.
++   * The registered list filter rewrites items for the request principal;
++   * hasMore still describes the provider page before filtering.
+    * @param request - literal message-content query.
+    * @param signal - cancellation for list and search reads.
+    * @returns authorized bounded Session search results.
+    */
+   @Remote('search')
+-  search(request: SessionSearchRequest, signal: AbortSignal): Promise<SessionSearchValue> {
+-    return this.listState.search(request.query, signal)
++  async search(request: SessionSearchRequest, signal: AbortSignal): Promise<SessionSearchValue> {
++    const value = await this.listState.search(request.query, signal)
++    return { ...value, items: await this.access.applyListFilter(value.items) }
+   }
+ 
+   /**
+    * Create or idempotently adopt one ordinary Session.
++   * The registered creation observer admits an anonymous create before any
++   * side effect and is awaited after success.
+    * @param request - requested identity, location, and Agent preset.
+    * @returns the Session identity and resolved preset when configured.
+    */
+   @Remote('create')
+-  create(request: SessionCreateRequest): Promise<SessionCreateValue> {
+-    return this.commands.create(request)
++  async create(request: SessionCreateRequest): Promise<SessionCreateValue> {
++    this.access.assertCreationAdmission()
++    const value = await this.commands.create(request)
++    await this.access.sessionCreated(value.sessionId)
++    return value
+   }
+ 
+   /**
+    * Select one Session-local model after explicitly resuming the Session.
++   * The registered access check admits the addressed Session first.
+    * @param request - Session identity and requested model selection.
+    * @returns the normalized selection installed for the Session.
+    */
+   @Remote('selectModel')
+-  selectModel(request: SessionSelectModelRequest): Promise<SessionSelectModelValue> {
++  async selectModel(request: SessionSelectModelRequest): Promise<SessionSelectModelValue> {
++    await this.access.assertSessionAccess(request.sessionId)
+     return this.commands.selectModel(request)
+   }
+ 
+@@ -298,86 +335,106 @@ export class SessionController extends TypertRemoteService {
+ 
+   /**
+    * Rename one Session after explicitly resuming it.
++   * The registered access check admits the addressed Session first.
+    * @param request - Session identity and proposed title.
+    * @returns the accepted title and durable event sequence.
+    */
+   @Remote('rename')
+-  rename(request: SessionRenameRequest): Promise<SessionRenameValue> {
++  async rename(request: SessionRenameRequest): Promise<SessionRenameValue> {
++    await this.access.assertSessionAccess(request.sessionId)
+     return this.commands.rename(request)
+   }
+ 
+   /**
+    * Fork one cold-readable completed-turn prefix into a new Session.
++   * The registered access check admits the source Session and the creation
++   * observer is awaited for the child.
+    * @param request - source Session and optional event anchor.
+    * @returns the new Session identity.
+    */
+   @Remote('fork')
+-  fork(request: SessionForkRequest): Promise<SessionForkValue> {
+-    return this.commands.fork(request)
++  async fork(request: SessionForkRequest): Promise<SessionForkValue> {
++    await this.access.assertSessionAccess(request.sessionId)
++    this.access.assertCreationAdmission()
++    const value = await this.commands.fork(request)
++    await this.access.sessionCreated(value.sessionId)
++    return value
+   }
+ 
+   /**
+    * Admit one prompt after explicitly resuming its Session.
++   * The registered access check admits the addressed Session first.
+    * @param request - Session identity, prompt content, source metadata, and delivery mode.
+    * @param signal - caller cancellation before prompt admission begins.
+    * @returns acknowledgement that the Agent accepted the prompt.
+    */
+   @Remote('prompt')
+-  prompt(request: SessionPromptRequest, signal: AbortSignal): Promise<SessionPromptValue> {
++  async prompt(request: SessionPromptRequest, signal: AbortSignal): Promise<SessionPromptValue> {
++    await this.access.assertSessionAccess(request.sessionId)
+     signal.throwIfAborted()
+     return this.commands.prompt(request)
+   }
+ 
+   /**
+    * Read one image proven reachable from the addressed Session log.
++   * The registered access check admits the addressed Session first.
+    * @param request - Session and attachment identities used for authorization.
+    * @returns the durable attachment reference and base64-encoded bytes.
+    */
+   @Remote('attachment')
+-  attachment(request: SessionAttachmentRequest): Promise<SessionAttachmentValue> {
++  async attachment(request: SessionAttachmentRequest): Promise<SessionAttachmentValue> {
++    await this.access.assertSessionAccess(request.sessionId)
+     return this.commands.attachment(request)
+   }
+ 
+   /**
+    * Mutate one still-pending queue occurrence on a live Agent.
++   * The registered access check admits the addressed Session first.
+    * @param request - Session, queue item, and requested mutation.
+    * @returns acknowledgement that the queue mutation was applied.
+    */
+   @Remote('updateQueue')
+-  updateQueue(request: SessionUpdateQueueRequest): SessionUpdateQueueValue {
++  async updateQueue(request: SessionUpdateQueueRequest): Promise<SessionUpdateQueueValue> {
++    await this.access.assertSessionAccess(request.sessionId)
+     return this.commands.updateQueue(request)
+   }
+ 
+   /**
+    * Cancel one active Agent turn without dropping its pending inbox.
++   * The registered access check admits the addressed Session first.
+    * @param request - Session whose active Agent turn is cancelled.
+    * @returns acknowledgement that cancellation was requested.
+    */
+   @Remote('cancel')
+-  cancel(request: SessionCancelRequest): SessionCancelValue {
++  async cancel(request: SessionCancelRequest): Promise<SessionCancelValue> {
++    await this.access.assertSessionAccess(request.sessionId)
+     return this.commands.cancel(request)
+   }
+ 
+   /**
+    * Read one cold-safe, message-aligned Session history page.
++   * The registered access check admits the Session the address names first.
+    * @param request - durable address, backward cursor, and page budget.
+    * @param signal - cancellation for persistence reads.
+    * @returns one chronological page.
+    */
+   @Remote('page')
+-  page(request: SessionPageRequest, signal: AbortSignal): Promise<SessionPage> {
++  async page(request: SessionPageRequest, signal: AbortSignal): Promise<SessionPage> {
++    await this.access.assertSessionAccess(addressId(request.address))
+     return this.history.page(request, signal)
+   }
+ 
+   /**
+    * Follow one Session log from its opening or resume cursor.
++   * The registered access check admits the Session the address names before
++   * the first frame.
+    * @param request - durable address and last committed sequence already held by the caller.
+    * @param signal - cancellation owned by the Remote stream carrier.
+    * @returns a complete opening snapshot followed by gap-free event frames.
+    */
+   @Remote({ mode: 'stream' })
+   follow(request: SessionFollowRequest, signal: AbortSignal): AsyncIterable<SessionFollowFrame> {
+-    return this.history.follow(request, signal)
++    return this.access.admittedStream(addressId(request.address), this.history.follow(request, signal))
+   }
+ 
+   /**
+diff --git a/packages/api/session-controller/src/types.ts b/packages/api/session-controller/src/types.ts
+index 167937e3d3..a11a070e50 100644
+--- a/packages/api/session-controller/src/types.ts
++++ b/packages/api/session-controller/src/types.ts
+@@ -168,6 +168,52 @@ export interface SessionSearchItem {
+   readonly snippet: string
+ }
+ 
++/** Structural floor for list-filter items: every list and search item names its Session. */
++export interface SessionListItem {
++  readonly sessionId: SessionId
++}
++
++/**
++ * Rewrite one list or search response outlet; the generic preserves the
++ * caller's item type, so list summaries and search hits stay distinct.
++ * @param principal - guard-supplied request identity, opaque to the host.
++ * @param items - complete unfiltered response items.
++ * @returns the filtered items (a promise is awaited).
++ */
++export type SessionListFilter = <Item extends SessionListItem>(
++  principal: unknown,
++  items: readonly Item[],
++) => readonly Item[] | Promise<readonly Item[]>
++
++/**
++ * Admission judgment for one addressed Session.
++ * @param principal - guard-supplied request identity, opaque to the host.
++ * @param sessionId - addressed durable Session identity.
++ * @returns true to allow; a promise is awaited.
++ */
++export type SessionAccessCheck = (
++  principal: unknown,
++  sessionId: SessionId,
++) => boolean | Promise<boolean>
++
++/**
++ * Notification after one successful create or fork; awaited before the
++ * response settles, and its rejection never fails the settled response.
++ * @param principal - guard-supplied request identity, opaque to the host.
++ * @param sessionId - newly created (or forked) Session identity.
++ */
++export type SessionCreatedNotifier = (
++  principal: unknown,
++  sessionId: SessionId,
++) => void | Promise<void>
++
++/** Optional session access hooks; each absent callback leaves that seam unchanged. */
++export interface SessionFilterHooks {
++  readonly listFilter?: SessionListFilter
++  readonly accessCheck?: SessionAccessCheck
++  readonly onSessionCreated?: SessionCreatedNotifier
++}
++
+ /** Maximum number of Sessions returned by one search. */
+ export const SESSION_SEARCH_RESULT_LIMIT = 20
+ 
+diff --git a/packages/api/session-controller/tests/access.host.spec.ts b/packages/api/session-controller/tests/access.host.spec.ts
+new file mode 100644
+index 0000000000..ebca2d019e
+--- /dev/null
++++ b/packages/api/session-controller/tests/access.host.spec.ts
+@@ -0,0 +1,525 @@
++/**
++ * Session access filter hooks: seat lifecycle, list and search outlet
++ * filtering, admission on every wired Remote method, creation notification,
++ * fail-closed behavior without a request principal, and the reusable
++ * `assertSessionAccess` admission primitive.
++ */
++
++import { mkdtempSync, realpathSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { Context } from '@deepseek-ai/cordis'
++import AgentRegistry from '@deepseek-ai/dsh-agent'
++import type { Agent, AgentFactory } from '@deepseek-ai/dsh-agent'
++import { AttachmentId } from '@deepseek-ai/dsh-attachment'
++import { runWithRequestPrincipal } from '@deepseek-ai/dsh-host-webserver'
++import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
++import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
++import type { Session, SessionHeader } from '@deepseek-ai/dsh-session'
++import {
++  SessionQueryEngine,
++  type SessionSearchHit,
++} from '@deepseek-ai/dsh-session-query'
++import { snapshotSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
++import { subagentIdentityProjectionDefinition } from '@deepseek-ai/dsh-subagent/src/projection.ts'
++import { describe, expect, it, vi } from 'vitest'
++import { SessionAccessPolicy } from '../src/access.ts'
++import type { SessionController } from '../src/index.ts'
++import type { SessionRequestId } from '../src/types.ts'
++import {
++  createSessionTestController,
++  createSessionTestRemote,
++  installSessionReadTestServices,
++  type TestSessionRemote,
++} from './test-remote.ts'
++
++const principal = { userId: 'u1' }
++const withPrincipal = <T>(run: () => Promise<T>): Promise<T> =>
++  runWithRequestPrincipal(principal, run)
++
++const cwd = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-session-access-')))
++const defaults = { defaultModelSelection: () => ({ provider: 'fixture', model: 'fixture-model' }), cwd }
++
++const promptRequest = (sessionId: SessionId) => ({
++  requestId: 'access-prompt' as SessionRequestId,
++  sessionId,
++  mode: 'queue' as const,
++  content: [{ type: 'text' as const, text: 'hello' }],
++})
++
++/** Register one live ordinary Agent over a real Session with spied turn entry points. */
++function liveAgent(ctx: Context, id: string): { readonly agent: Agent; readonly followup: ReturnType<typeof vi.fn> } {
++  const session = ctx.sessions.create(SessionId(id), { meta: { cwd } })
++  const followup = vi.fn()
++  const agent = {
++    id: session.id, session, status: 'idle', ctx, followup, cancel: vi.fn(),
++  } as unknown as Agent
++  ctx.agents.register(agent)
++  return { agent, followup }
++}
++
++/** Register one Session whose log holds one completed turn (commands-create-fork fixture). */
++function completedSession(ctx: Context, id: string): Session {
++  const session = ctx.sessions.create(SessionId(id), { meta: { cwd } })
++  session.append('turn/start', { turn: 1 })
++  session.append('user/message', createUserMessage({
++    content: [{ type: 'text', text: 'work' }], source: { kind: 'user' },
++  }), { surfaceOp: 'append' })
++  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
++  return session
++}
++
++/** Real query core with a programmable full-text provider (session-search fixture). */
++class SearchSessionQuery extends SessionQueryEngine {
++  constructor(
++    ctx: Context,
++    private readonly search: (
++      ...args: Parameters<SessionQueryEngine['searchSessions']>
++    ) => Promise<unknown>,
++  ) {
++    super(ctx)
++  }
++
++  override searchSessions(
++    ...args: Parameters<SessionQueryEngine['searchSessions']>
++  ): ReturnType<SessionQueryEngine['searchSessions']> {
++    return this.search(...args) as ReturnType<SessionQueryEngine['searchSessions']>
++  }
++
++  override searchEvents(): Promise<never> {
++    return Promise.reject(new Error('event search is not configured in this test'))
++  }
++}
++
++function searchHit(id: string, index = 0): SessionSearchHit {
++  const header: SessionHeader = { version: 0, id: SessionId(id), createdAt: 100, cwd }
++  return {
++    header,
++    live: true,
++    persisted: false,
++    bestMatch: {
++      sessionId: header.id,
++      seq: index,
++      type: 'user/message',
++      time: 200 + index,
++      surface: 'current',
++      snippet: `match ${index}`,
++    },
++  }
++}
++
++interface Bench {
++  readonly ctx: Context
++  readonly controller: SessionController
++  readonly remote: TestSessionRemote
++}
++
++/** Boot one full Session Controller; `beforeController` installs test-local services first. */
++async function boot(beforeController?: (ctx: Context) => void): Promise<Bench> {
++  const ctx = new Context()
++  await ctx.plugin(SessionStore)
++  await ctx.plugin(AgentRegistry)
++  ctx.provide('llm', {
++    listProviders: () => [{ id: 'fixture', name: 'fixture' }],
++    resolveCallConfig: async (request: { provider: string; model: string }) => request,
++  } as never)
++  ctx.provide('workspaceRegistry', { get: () => undefined, list: () => [] } as never)
++  // Store-backed structural factory: create and fork forward seed/meta into the
++  // real SessionStore and register an idle Agent stub over the result.
++  const factory: AgentFactory = {
++    async createAgent(_ownerCtx, options) {
++      const session = ctx.sessions.create(options.sessionId, {
++        ...options.seed === undefined ? {} : { seed: [...options.seed] },
++        ...options.meta === undefined ? {} : { meta: options.meta },
++      })
++      const agent = { id: session.id, session, status: 'idle' } as Agent
++      const agentCtx = ctx.extend({ agent })
++      ;(agent as { ctx?: Context }).ctx = agentCtx
++      await options.setup?.(agentCtx)
++      const unregister = ctx.agents.register(agent)
++      return { agent, dispose: () => { unregister(); return Promise.resolve() } }
++    },
++    async resume() {
++      throw new Error('access harness has no persisted sessions')
++    },
++  }
++  ctx.agents.setFactory(factory)
++  beforeController?.(ctx)
++  return {
++    ctx,
++    controller: createSessionTestController(ctx, defaults),
++    remote: createSessionTestRemote(ctx, defaults),
++  }
++}
++
++describe('session filter seat', () => {
++  it('rejects a second registration and releases the seat on dispose', async () => {
++    const { ctx, controller, remote } = await boot()
++    const dispose = controller.registerSessionFilter({})
++    expect(() => controller.registerSessionFilter({})).toThrow(/filter hooks already registered/)
++
++    dispose()
++    // The seat is free again (HMR disposal semantics) and behavior is unchanged.
++    const reRegistered = controller.registerSessionFilter({})
++    reRegistered()
++    await expect(remote.list({})).resolves.toMatchObject({ ok: true, value: { items: [] } })
++    await ctx.fiber.dispose()
++  })
++
++  it('leaves list, page, and the admission primitive unchanged while unregistered', async () => {
++    const { ctx, controller, remote } = await boot()
++    const session = completedSession(ctx, 'seat-unconfigured')
++
++    await expect(remote.list({})).resolves.toMatchObject({
++      ok: true,
++      value: { items: [{ sessionId: 'seat-unconfigured' }] },
++    })
++    await expect(remote.page({
++      address: { kind: 'session', sessionId: session.id }, throughSeq: 0,
++    }, new AbortController().signal)).resolves.toMatchObject({ ok: true })
++    await expect(controller.assertSessionAccess(session.id)).resolves.toBeUndefined()
++    await ctx.fiber.dispose()
++  })
++})
++
++describe('session filter listFilter', () => {
++  it('filters list rows for the request principal', async () => {
++    const { ctx, controller, remote } = await boot()
++    ctx.sessions.create(SessionId('list-alpha'), { meta: { cwd } })
++    ctx.sessions.create(SessionId('list-beta'), { meta: { cwd } })
++    const seen: unknown[] = []
++    controller.registerSessionFilter({
++      listFilter: (who, items) => {
++        seen.push(who)
++        return items.filter(item => item.sessionId === SessionId('list-alpha'))
++      },
++    })
++
++    const response = await withPrincipal(() => remote.list({}))
++
++    expect(seen[0]).toBe(principal)
++    expect(response).toMatchObject({ ok: true, value: { items: [{ sessionId: 'list-alpha' }] } })
++    await ctx.fiber.dispose()
++  })
++
++  it('filters search items without recomputing hasMore', async () => {
++    const { ctx, controller, remote } = await boot((bench) => {
++      const hits = Array.from({ length: 21 }, (_, index) => searchHit(`search-${String(index)}`))
++      new SearchSessionQuery(bench, vi.fn()
++        .mockResolvedValueOnce({ items: hits.slice(0, 20), nextCursor: 'page-2' })
++        .mockResolvedValueOnce({ items: hits.slice(20) }))
++    })
++    for (let index = 0; index < 21; index++) {
++      ctx.sessions.create(SessionId(`search-${String(index)}`), { meta: { cwd } })
++    }
++    controller.registerSessionFilter({
++      listFilter: (_who, items) => items.filter(item => item.sessionId === SessionId('search-0')),
++    })
++
++    const response = await withPrincipal(() => remote.search({ query: 'match' }, new AbortController().signal))
++
++    // hasMore describes the provider page before filtering: 20 collected hits
++    // reached the result boundary even though only one row survives.
++    expect(response).toMatchObject({
++      ok: true,
++      value: { items: [{ sessionId: 'search-0', snippet: 'match 0' }], hasMore: true },
++    })
++    await ctx.fiber.dispose()
++  })
++
++  it('denies list and search fail-closed without a request principal', async () => {
++    const { ctx, controller, remote } = await boot()
++    controller.registerSessionFilter({ listFilter: () => [] })
++
++    await expect(remote.list({})).resolves.toMatchObject({
++      ok: false,
++      error: { code: 'forbidden' },
++    })
++    await expect(remote.search({ query: 'match' }, new AbortController().signal)).resolves.toMatchObject({
++      ok: false,
++      error: { code: 'forbidden' },
++    })
++    await ctx.fiber.dispose()
++  })
++
++  it('denies and warns when the filter throws', async () => {
++    const { ctx, controller, remote } = await boot()
++    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
++    controller.registerSessionFilter({
++      listFilter: () => {
++        throw new Error('filter offline')
++      },
++    })
++
++    await expect(withPrincipal(() => remote.list({}))).resolves.toMatchObject({
++      ok: false,
++      error: { code: 'forbidden' },
++    })
++    expect(warn).toHaveBeenCalledWith(expect.stringContaining('listFilter'))
++    await ctx.fiber.dispose()
++  })
++
++  it('leaves list unfiltered when the seat holds no listFilter', async () => {
++    const { ctx, controller, remote } = await boot()
++    ctx.sessions.create(SessionId('unfiltered'), { meta: { cwd } })
++    controller.registerSessionFilter({ accessCheck: () => true })
++
++    // accessCheck alone never gates list, with or without a principal.
++    await expect(remote.list({})).resolves.toMatchObject({
++      ok: true,
++      value: { items: [{ sessionId: 'unfiltered' }] },
++    })
++    await expect(withPrincipal(() => remote.list({}))).resolves.toMatchObject({
++      ok: true,
++      value: { items: [{ sessionId: 'unfiltered' }] },
++    })
++    await ctx.fiber.dispose()
++  })
++})
++
++describe('session filter accessCheck', () => {
++  it('admits or denies page by the addressed Session for ordinary and subagent addresses', async () => {
++    const { ctx, controller, remote } = await boot((bench) => {
++      installSessionReadTestServices(bench)
++      bench.sessionProjections.register(subagentIdentityProjectionDefinition)
++    })
++    const parentSessionId = SessionId('access-parent')
++    const childSessionId = SessionId('access-child')
++    ctx.sessions.create(parentSessionId, { meta: { cwd } })
++    const child = ctx.sessions.create(childSessionId, {
++      meta: { cwd, origin: 'subagent', parentSession: parentSessionId },
++    })
++    child.append('subagent/descriptor', snapshotSubagentDescriptor({
++      mode: 'continuable', provider: 'test', label: 'child',
++    }))
++    const addressed: SessionId[] = []
++    controller.registerSessionFilter({
++      accessCheck: (who, sessionId) => {
++        expect(who).toBe(principal)
++        addressed.push(sessionId)
++        return sessionId === childSessionId
++      },
++    })
++    const signal = new AbortController().signal
++
++    await expect(withPrincipal(() => remote.page({
++      address: { kind: 'session', sessionId: parentSessionId }, throughSeq: -1,
++    }, signal))).resolves.toMatchObject({
++      ok: false,
++      error: { code: 'forbidden', details: { sessionId: 'access-parent' } },
++    })
++    await expect(withPrincipal(() => remote.page({
++      address: { kind: 'subagent', parentSessionId, childSessionId, mode: 'continuable' },
++      throughSeq: 0,
++    }, signal))).resolves.toMatchObject({
++      ok: true,
++      value: { records: [{ type: 'event', event: { type: 'subagent/descriptor' } }] },
++    })
++    // A subagent address is checked against the child Session it names.
++    expect(addressed).toEqual([parentSessionId, childSessionId])
++    await ctx.fiber.dispose()
++  })
++
++  it('denies prompt, cancel, rename, and selectModel with the stable forbidden code', async () => {
++    const { ctx, controller, remote } = await boot()
++    const sessionId = SessionId('denied-agent')
++    controller.registerSessionFilter({ accessCheck: () => false })
++
++    await expect(withPrincipal(() => remote.prompt(promptRequest(sessionId), new AbortController().signal)))
++      .resolves.toMatchObject({ ok: false, error: { code: 'forbidden', details: { sessionId } } })
++    await expect(withPrincipal(() => remote.cancel({ sessionId })))
++      .resolves.toMatchObject({ ok: false, error: { code: 'forbidden', details: { sessionId } } })
++    await expect(withPrincipal(() => remote.rename({ sessionId, title: 'name' })))
++      .resolves.toMatchObject({ ok: false, error: { code: 'forbidden', details: { sessionId } } })
++    await expect(withPrincipal(() => remote.selectModel({
++      sessionId, provider: 'fixture', model: 'fixture-model',
++    })))
++      .resolves.toMatchObject({ ok: false, error: { code: 'forbidden', details: { sessionId } } })
++    await ctx.fiber.dispose()
++  })
++
++  it('allows prompt, cancel, rename, and selectModel through to their commands', async () => {
++    const { ctx, controller, remote } = await boot()
++    const { agent, followup } = liveAgent(ctx, 'allowed-agent')
++    ctx.provide('sessionTitle', { rename: () => ({ title: 'kept', eventSeq: 7 }) } as never)
++    controller.registerSessionFilter({ accessCheck: () => true })
++
++    await expect(withPrincipal(() => remote.prompt(promptRequest(agent.id), new AbortController().signal)))
++      .resolves.toMatchObject({ ok: true, value: { accepted: true } })
++    expect(followup).toHaveBeenCalledOnce()
++    await expect(withPrincipal(() => remote.cancel({ sessionId: agent.id })))
++      .resolves.toMatchObject({ ok: true, value: { accepted: true } })
++    expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: true })
++    await expect(withPrincipal(() => remote.rename({ sessionId: agent.id, title: 'name' })))
++      .resolves.toMatchObject({ ok: true, value: { title: 'kept', seq: 7 } })
++    await expect(withPrincipal(() => remote.selectModel({
++      sessionId: agent.id, provider: 'fixture', model: 'fixture-model',
++    })))
++      .resolves.toMatchObject({
++        ok: true,
++        value: { selected: { provider: 'fixture', model: 'fixture-model' } },
++      })
++    await ctx.fiber.dispose()
++  })
++
++  it('denies every wired method fail-closed without a request principal', async () => {
++    const { ctx, controller, remote } = await boot()
++    const sessionId = SessionId('principal-less-agent')
++    controller.registerSessionFilter({ accessCheck: () => true })
++    const forbidden = { ok: false, error: { code: 'forbidden' } }
++
++    await expect(remote.page({
++      address: { kind: 'session', sessionId }, throughSeq: -1,
++    }, new AbortController().signal)).resolves.toMatchObject(forbidden)
++    await expect(remote.prompt(promptRequest(sessionId), new AbortController().signal))
++      .resolves.toMatchObject(forbidden)
++    await expect(remote.cancel({ sessionId })).resolves.toMatchObject(forbidden)
++    await expect(remote.rename({ sessionId, title: 'name' })).resolves.toMatchObject(forbidden)
++    await expect(remote.selectModel({ sessionId, provider: 'fixture', model: 'fixture-model' }))
++      .resolves.toMatchObject(forbidden)
++    await expect(remote.updateQueue({
++      sessionId, itemId: MessageId('m1'), action: { kind: 'remove' },
++    })).resolves.toMatchObject(forbidden)
++    await expect(remote.attachment({ sessionId, attachmentId: AttachmentId('a1') }))
++      .resolves.toMatchObject(forbidden)
++    await expect(remote.fork({ sessionId })).resolves.toMatchObject(forbidden)
++    const iterator = remote.follow({
++      address: { kind: 'session', sessionId },
++    }, new AbortController().signal)[Symbol.asyncIterator]()
++    await expect(iterator.next()).rejects.toMatchObject({ failure: { code: 'forbidden' } })
++    await ctx.fiber.dispose()
++  })
++
++  it('denies and warns when the check throws', async () => {
++    const { ctx, controller, remote } = await boot()
++    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
++    controller.registerSessionFilter({
++      accessCheck: () => {
++        throw new Error('policy store offline')
++      },
++    })
++
++    await expect(withPrincipal(() => remote.page({
++      address: { kind: 'session', sessionId: SessionId('throwing-check') }, throughSeq: -1,
++    }, new AbortController().signal))).resolves.toMatchObject({
++      ok: false,
++      error: { code: 'forbidden' },
++    })
++    expect(warn).toHaveBeenCalledWith(expect.stringContaining('accessCheck'))
++    await ctx.fiber.dispose()
++  })
++
++  it('leaves addressed methods unchanged when the seat holds no accessCheck', async () => {
++    const { ctx, controller, remote } = await boot()
++    const session = completedSession(ctx, 'unadmitted')
++    controller.registerSessionFilter({ onSessionCreated: () => {} })
++
++    // No accessCheck is registered, so an anonymous page still succeeds.
++    await expect(remote.page({
++      address: { kind: 'session', sessionId: session.id }, throughSeq: 0,
++    }, new AbortController().signal)).resolves.toMatchObject({ ok: true })
++    await ctx.fiber.dispose()
++  })
++})
++
++describe('session filter onSessionCreated', () => {
++  it('notifies create with the request principal and new Session identity', async () => {
++    const { ctx, controller, remote } = await boot()
++    const created = vi.fn()
++    controller.registerSessionFilter({ onSessionCreated: created })
++
++    const response = await withPrincipal(() => remote.create({ sessionId: SessionId('claimed') }))
++
++    expect(response).toMatchObject({ ok: true, value: { sessionId: 'claimed' } })
++    expect(created).toHaveBeenCalledOnce()
++    const [who, sessionId] = created.mock.calls[0] as [unknown, SessionId]
++    expect(who).toBe(principal)
++    expect(sessionId).toBe(SessionId('claimed'))
++    await ctx.fiber.dispose()
++  })
++
++  it('notifies fork with the child Session identity', async () => {
++    const { ctx, controller, remote } = await boot()
++    const source = completedSession(ctx, 'fork-source')
++    const created = vi.fn()
++    controller.registerSessionFilter({ onSessionCreated: created })
++
++    const response = await withPrincipal(() => remote.fork({ sessionId: source.id }))
++
++    expect(response.ok).toBe(true)
++    if (response.ok) {
++      expect(created).toHaveBeenCalledOnce()
++      expect(created).toHaveBeenCalledWith(principal, response.value.sessionId)
++    }
++    await ctx.fiber.dispose()
++  })
++
++  it('rejects an anonymous create before any creation side effect', async () => {
++    const { ctx, controller, remote } = await boot()
++    const created = vi.fn()
++    controller.registerSessionFilter({ onSessionCreated: created })
++    const observe = vi.spyOn(ctx.sessionQuery, 'observeSession')
++
++    const response = await remote.create({ sessionId: SessionId('anonymous') })
++
++    expect(response).toMatchObject({ ok: false, error: { code: 'forbidden' } })
++    expect(created).not.toHaveBeenCalled()
++    expect(observe).not.toHaveBeenCalled()
++    expect(ctx.sessions.get(SessionId('anonymous'))).toBeUndefined()
++    expect(ctx.agents.get(SessionId('anonymous'))).toBeUndefined()
++    await ctx.fiber.dispose()
++  })
++
++  it('keeps create successful when the observer throws, and warns', async () => {
++    const { ctx, controller, remote } = await boot()
++    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
++    controller.registerSessionFilter({
++      onSessionCreated: () => {
++        throw new Error('claim store offline')
++      },
++    })
++
++    const response = await withPrincipal(() => remote.create({ sessionId: SessionId('notify-failed') }))
++
++    expect(response).toMatchObject({ ok: true, value: { sessionId: 'notify-failed' } })
++    expect(warn).toHaveBeenCalledWith(expect.stringContaining('onSessionCreated'))
++    await ctx.fiber.dispose()
++  })
++
++  it('skips and warns when creation completes without a principal', async () => {
++    const ctx = new Context()
++    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
++    const policy = new SessionAccessPolicy(ctx)
++    const created = vi.fn()
++    policy.register({ onSessionCreated: created })
++
++    // Reachable only without a matching creation-admission check.
++    await expect(policy.sessionCreated(SessionId('orphan'))).resolves.toBeUndefined()
++    expect(created).not.toHaveBeenCalled()
++    expect(warn).toHaveBeenCalledWith(expect.stringContaining('without a request principal'))
++    await ctx.fiber.dispose()
++  })
++})
++
++describe('session filter admission primitive', () => {
++  it('returns the same verdict as the wired methods through assertSessionAccess', async () => {
++    const { ctx, controller, remote } = await boot()
++    ctx.sessions.create(SessionId('structural'), { meta: { cwd } })
++    controller.registerSessionFilter({
++      accessCheck: (_who, sessionId) => sessionId === SessionId('structural'),
++    })
++
++    // A future direct route addressing a Session consumes the same verdict.
++    await expect(withPrincipal(() => controller.assertSessionAccess(SessionId('structural'))))
++      .resolves.toBeUndefined()
++    await expect(withPrincipal(() => controller.assertSessionAccess(SessionId('bypassed'))))
++      .rejects.toMatchObject({ failure: { code: 'forbidden', details: { sessionId: 'bypassed' } } })
++    await expect(withPrincipal(() => remote.page({
++      address: { kind: 'session', sessionId: SessionId('bypassed') }, throughSeq: -1,
++    }, new AbortController().signal))).resolves.toMatchObject({
++      ok: false,
++      error: { code: 'forbidden', details: { sessionId: 'bypassed' } },
++    })
++    await ctx.fiber.dispose()
++  })
++})
+diff --git a/packages/api/session-controller/tsconfig.host.json b/packages/api/session-controller/tsconfig.host.json
+index bea21672b7..8d1471c5e5 100644
+--- a/packages/api/session-controller/tsconfig.host.json
++++ b/packages/api/session-controller/tsconfig.host.json
+@@ -10,6 +10,7 @@
+     "src/invariant.ts",
+     "src/types.ts",
+     "src/remote-events.ts",
++    "src/access.ts",
+     "src/agent.ts",
+     "src/catalog.ts",
+     "src/commands.ts",
+@@ -28,6 +29,7 @@
+     { "path": "../../core/scope" },
+     { "path": "../../core/session" },
+     { "path": "../../context/file-reference" },
++    { "path": "../../host/webserver" },
+     { "path": "../../attachment/attachment" },
+     { "path": "../../interaction/permission-presets" },
+     { "path": "../../jobs/jobs" },
 diff --git a/packages/host/webserver/README.i18n.yaml b/packages/host/webserver/README.i18n.yaml
-index e5f84d4a7a..64cc5f93cb 100644
+index e5f84d4a7a..7c8a4650f9 100644
 --- a/packages/host/webserver/README.i18n.yaml
 +++ b/packages/host/webserver/README.i18n.yaml
 @@ -2,5 +2,5 @@
@@ -8,10 +1371,10 @@ index e5f84d4a7a..64cc5f93cb 100644
  #   pnpm run verify-translation-pairing --write packages/host/webserver/README.md
 -README.md: 4211c640a0e7386e3380a4289e5ba619818bd094
 -README.zh.md: 6ad4f549cd234221cfef88ef0bfd9541fbe50043
-+README.md: 90ace40dadc20bf0581f34666a6cba9d6aa242ca
-+README.zh.md: 6347c5ac24cb86bdb0f15f29667529976c8c8ef4
++README.md: 17ccb3d7a7ece23b779228f37d7e2e414ae1e9f0
++README.zh.md: 8c260d59456d3e99acdee6e0a577b7ad1c6b9c1f
 diff --git a/packages/host/webserver/README.md b/packages/host/webserver/README.md
-index 4211c640a0..90ace40dad 100644
+index 4211c640a0..17ccb3d7a7 100644
 --- a/packages/host/webserver/README.md
 +++ b/packages/host/webserver/README.md
 @@ -1,5 +1,5 @@
@@ -30,7 +1393,7 @@ index 4211c640a0..90ace40dad 100644
  
  ## Table of Contents
  
-@@ -50,6 +50,10 @@ Set `compression: 'gzip'` to wrap eligible socket-backed responses without chang
+@@ -50,6 +50,12 @@ Set `compression: 'gzip'` to wrap eligible socket-backed responses without chang
  
  Index startup inputs are two layers. `collectIndexInjections()` gathers a fresh injection table — one `webserver/index-inject` emit per call, each subscriber pushing its current rows — and `renderIndex(html)` renders those rows into the index.html body before applying the raw `tapIndex(transform)` transforms in registration order. A `script-preload` row renders an advisory classic-script preload link. Static deployments carry the same rows in their boot payload. `applyIndexTaps(html)` applies only the raw transforms; it is the escape hatch for markup no row expresses.
  
@@ -38,10 +1401,12 @@ index 4211c640a0..90ace40dad 100644
 +
 +`registerGuard(guard)` claims the one admission callback consulted before any routing on every HTTP and upgrade request. A second registration throws; while no guard is registered every request is admitted with no observable change. An allow may attach a principal that handlers read through `principalOf(req)`; a veto answers with the guard's status and body fields on HTTP and destroys the upgrade socket without a 101. A guard that throws or rejects is logged and vetoed with the default fields (fail-closed).
 +
++A guard allow with a principal also propagates it into the request continuation: handlers, and any code they await (including the `/api` RPC dispatch down to domain methods), read it through `currentRequestPrincipal()`; `runWithRequestPrincipal()` enters the scope explicitly for tests and alternative carriers. Without a guard principal the reader returns `undefined` and behavior is unchanged.
++
  ### Behavior under failure
  
  A listen failure (for example EADDRINUSE) rejects plugin initialization with the bind diagnostic. An HTTP request whose handler throws is answered 400 — or the socket destroyed when headers are already out — and logged as a warning; it never exits the process. An upgrade-handler exception or upgraded-socket transport error logs a warning and destroys its socket.
-@@ -64,7 +68,7 @@ A listen failure (for example EADDRINUSE) rejects plugin initialization with the
+@@ -64,7 +70,7 @@ A listen failure (for example EADDRINUSE) rejects plugin initialization with the
  
  ### Design concept
  
@@ -50,7 +1415,7 @@ index 4211c640a0..90ace40dad 100644
  
  ### Matching and lifecycle
  
-@@ -74,7 +78,7 @@ The package is a plain route registry with no harness vocabulary: `WebServer` ex
+@@ -74,7 +80,7 @@ The package is a plain route registry with no harness vocabulary: `WebServer` ex
  
  | File | Role |
  |---|---|
@@ -60,7 +1425,7 @@ index 4211c640a0..90ace40dad 100644
  
  </details>
 diff --git a/packages/host/webserver/README.zh.md b/packages/host/webserver/README.zh.md
-index 6ad4f549cd..6347c5ac24 100644
+index 6ad4f549cd..8c260d5945 100644
 --- a/packages/host/webserver/README.zh.md
 +++ b/packages/host/webserver/README.zh.md
 @@ -1,5 +1,5 @@
@@ -79,7 +1444,7 @@ index 6ad4f549cd..6347c5ac24 100644
  
  ## 目录
  
-@@ -50,6 +50,10 @@ kind: "package-reference"
+@@ -50,6 +50,12 @@ kind: "package-reference"
  
  index 启动输入分两层。`collectIndexInjections()` 收集一张全新的注入表——每次调用发一次 `webserver/index-inject` 事件，每个订阅方推入其当前行——`renderIndex(html)` 先把这些行渲染进 index.html 正文，再按注册顺序应用原始 `tapIndex(transform)` 转换。`script-preload` 行会渲染为 classic script 的提示性 preload 链接。静态部署会在启动 payload 中携带同一批行。`applyIndexTaps(html)` 只应用原始转换；它是任何行都无法表达的标记的逃生口。
  
@@ -87,10 +1452,12 @@ index 6ad4f549cd..6347c5ac24 100644
 +
 +`registerGuard(guard)` 认领在所有 HTTP 与 upgrade 请求路由之前咨询的唯一个准入回调。第二次注册会抛错；未注册守卫时每个请求都原样放行，行为无可观察变化。allow 可以附加一个 principal，handler 通过 `principalOf(req)` 读取；veto 在 HTTP 上以守卫的 status 与 body 字段应答，在 upgrade 上不发 101 直接销毁 socket。守卫抛错或被 reject 时记录 warning 并按默认字段否决（fail-closed）。
 +
++守卫 allow 并附加 principal 时，该 principal 还会传播进请求 continuation：handler 以及它们 await 的任何代码（包括 `/api` RPC 分发直至域方法）都通过 `currentRequestPrincipal()` 读取它；`runWithRequestPrincipal()` 供测试与替代载体显式进入该作用域。没有守卫 principal 时，读取器返回 `undefined`，行为保持不变。
++
  ### 失败时的行为
  
  监听失败（例如 EADDRINUSE）会以绑定诊断信息拒绝插件初始化。handler 抛错的 HTTP 请求会得到 400——若响应头已经发出则销毁 socket——并记录 warning；它绝不会退出进程。upgrade handler 抛错或升级 socket 出现传输错误时，会记录 warning 并销毁对应 socket。
-@@ -64,7 +68,7 @@ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的
+@@ -64,7 +70,7 @@ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的
  
  ### 设计理念
  
@@ -99,7 +1466,7 @@ index 6ad4f549cd..6347c5ac24 100644
  
  ### 匹配与生命周期
  
-@@ -74,7 +78,7 @@ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的
+@@ -74,7 +80,7 @@ index 启动输入分两层。`collectIndexInjections()` 收集一张全新的
  
  | 文件 | 职责 |
  |---|---|
@@ -109,7 +1476,7 @@ index 6ad4f549cd..6347c5ac24 100644
  
  </details>
 diff --git a/packages/host/webserver/src/index.ts b/packages/host/webserver/src/index.ts
-index bc41100de9..71020c4035 100644
+index bc41100de9..0d0579dfa4 100644
 --- a/packages/host/webserver/src/index.ts
 +++ b/packages/host/webserver/src/index.ts
 @@ -1,9 +1,9 @@
@@ -126,7 +1493,19 @@ index bc41100de9..71020c4035 100644
   */
  
  import { createServer } from 'node:http'
-@@ -55,6 +55,28 @@ export interface WebUpgradeRoute {
+@@ -15,9 +15,11 @@ import z from '@deepseek-ai/schemastery'
+ import compressionMiddleware from 'compression'
+ import Negotiator from 'negotiator'
+ import { renderIndexInjections, type IndexInjection } from './injections.ts'
++import { runWithRequestPrincipal } from './request-principal.ts'
+ 
+ export { renderIndexInjections } from './injections.ts'
+ export type { IndexInjection, IndexInjectionPlacement } from './injections.ts'
++export { currentRequestPrincipal, runWithRequestPrincipal } from './request-principal.ts'
+ 
+ declare module '@deepseek-ai/cordis' {
+   interface Context {
+@@ -55,6 +57,28 @@ export interface WebUpgradeRoute {
    handler: (req: IncomingMessage, socket: Duplex, head: Buffer) => void | Promise<void>
  }
  
@@ -155,7 +1534,7 @@ index bc41100de9..71020c4035 100644
  /** Web server listen and response-compression config. */
  export interface Config {
    /** Listen host; the two supported values are loopback and all-interfaces. */
-@@ -136,6 +158,8 @@ export class WebServer extends Service {
+@@ -136,6 +160,8 @@ export class WebServer extends Service {
    private readonly upgradedSockets = new Set<Duplex>()
    private readonly indexTaps: ((html: string) => string)[] = []
    private fallback: WebRoute['handler'] | undefined
@@ -164,7 +1543,7 @@ index bc41100de9..71020c4035 100644
    private server!: Server
    private listenedPort!: number
    private readonly gzip: NodeMiddleware | undefined
-@@ -201,6 +225,32 @@ export class WebServer extends Service {
+@@ -201,6 +227,32 @@ export class WebServer extends Service {
      return () => { this.fallback = undefined }
    }
  
@@ -197,21 +1576,52 @@ index bc41100de9..71020c4035 100644
    /**
     * Register a raw-HTML index transform, the escape hatch for markup no
     * {@link IndexInjection} row expresses: {@link renderIndex} applies taps in
-@@ -219,6 +269,13 @@ export class WebServer extends Service {
+@@ -219,21 +271,32 @@ export class WebServer extends Service {
    /** Listen; resolves once the socket is bound (rejection = FAILED fiber). */
    async [Service.init](): Promise<void> {
      const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+-      /* v8 ignore next -- `?? '/'` arm: node:http always sets url on server
+-      requests; the field is only optional on the client-side IncomingMessage type */
+-      const rawPath = new URL(req.url ?? '/', 'http://x').pathname
+-      const route = this.match(rawPath)
+-      if (route !== undefined) {
+-        await route.handler(req, res)
 +      const decision = await this.decide(req, 'http')
 +      if (!decision.allow) {
 +        res.writeHead(decision.status ?? 401, { 'content-type': 'text/plain; charset=utf-8' })
 +        res.end(decision.body ?? 'Unauthorized')
-+        return
-+      }
+         return
+       }
+-      const fallback = this.fallback
+-      if (fallback === undefined) {
+-        res.writeHead(404)
+-        res.end()
+-        return
 +      if (decision.principal !== undefined) this.principals.set(req, decision.principal)
-       /* v8 ignore next -- `?? '/'` arm: node:http always sets url on server
-       requests; the field is only optional on the client-side IncomingMessage type */
-       const rawPath = new URL(req.url ?? '/', 'http://x').pathname
-@@ -264,29 +321,7 @@ export class WebServer extends Service {
++      const dispatch = async (): Promise<void> => {
++        /* v8 ignore next -- `?? '/'` arm: node:http always sets url on server
++        requests; the field is only optional on the client-side IncomingMessage type */
++        const rawPath = new URL(req.url ?? '/', 'http://x').pathname
++        const route = this.match(rawPath)
++        if (route !== undefined) {
++          await route.handler(req, res)
++          return
++        }
++        const fallback = this.fallback
++        if (fallback === undefined) {
++          res.writeHead(404)
++          res.end()
++          return
++        }
++        await fallback(req, res)
+       }
+-      await fallback(req, res)
++      if (decision.principal === undefined) await dispatch()
++      else await runWithRequestPrincipal(decision.principal, dispatch)
+     }
+     // Last-resort guard: handle() rejecting would otherwise be an unhandled
+     // rejection killing the process on one malformed request (bad %-escape,
+@@ -264,29 +327,7 @@ export class WebServer extends Service {
          socket.off('error', onError)
          this.upgradedSockets.delete(socket)
        })
@@ -242,7 +1652,7 @@ index bc41100de9..71020c4035 100644
      })
  
      await new Promise<void>((resolve, reject) => {
-@@ -314,6 +349,68 @@ export class WebServer extends Service {
+@@ -314,6 +355,72 @@ export class WebServer extends Service {
      }, 'webServer.listen')
    }
  
@@ -298,10 +1708,14 @@ index bc41100de9..71020c4035 100644
 +    }
 +    this.upgradedSockets.add(socket)
 +    try {
-+      Promise.resolve(route.handler(req, socket, head)).catch((error: unknown) => {
-+        this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
-+        socket.destroy()
-+      })
++      const invoke = (): void => {
++        Promise.resolve(route.handler(req, socket, head)).catch((error: unknown) => {
++          this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
++          socket.destroy()
++        })
++      }
++      if (decision.principal === undefined) invoke()
++      else runWithRequestPrincipal(decision.principal, invoke)
 +    } catch (error) {
 +      this.ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
 +      socket.destroy()
@@ -311,8 +1725,40 @@ index bc41100de9..71020c4035 100644
    /** Longest-prefix-wins over the prefix table after an exact-table miss. */
    private match(pathname: string): WebRoute | undefined {
      const exact = this.exact.get(pathname)
+diff --git a/packages/host/webserver/src/request-principal.ts b/packages/host/webserver/src/request-principal.ts
+new file mode 100644
+index 0000000000..8c9771dfae
+--- /dev/null
++++ b/packages/host/webserver/src/request-principal.ts
+@@ -0,0 +1,26 @@
++/** Request-scoped propagation of the guard-supplied principal. */
++
++import { AsyncLocalStorage } from 'node:async_hooks'
++
++const requestPrincipal = new AsyncLocalStorage<{ readonly principal: unknown }>()
++
++/**
++ * Run one request continuation with a principal readable through
++ * {@link currentRequestPrincipal}; entering is owned by the webserver's
++ * dispatch funnels after the guard allowed with a principal.
++ * @param principal - guard-supplied identity for this request.
++ * @param run - continuation owning the request's dispatch.
++ * @returns the continuation's result.
++ */
++export function runWithRequestPrincipal<T>(principal: unknown, run: () => T): T {
++  return requestPrincipal.run({ principal }, run)
++}
++
++/**
++ * The principal the guard attached to the current request continuation:
++ * undefined off a request, or when the guard allowed without a principal.
++ * @returns the guard-supplied principal, or undefined.
++ */
++export function currentRequestPrincipal(): unknown {
++  return requestPrincipal.getStore()?.principal
++}
 diff --git a/packages/host/webserver/tests/webserver.spec.ts b/packages/host/webserver/tests/webserver.spec.ts
-index b7ac506b17..996cc17347 100644
+index b7ac506b17..a2b2784540 100644
 --- a/packages/host/webserver/tests/webserver.spec.ts
 +++ b/packages/host/webserver/tests/webserver.spec.ts
 @@ -9,13 +9,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -327,11 +1773,39 @@ index b7ac506b17..996cc17347 100644
  import Loader from '@deepseek-ai/cordis-plugin-loader'
  import Include from '@deepseek-ai/cordis-plugin-include'
 -import HttpServer, { renderIndexInjections } from '../src/index.ts'
-+import HttpServer, { renderIndexInjections, type RequestGuardDecision } from '../src/index.ts'
++import HttpServer, { currentRequestPrincipal, renderIndexInjections, type RequestGuardDecision } from '../src/index.ts'
  
  let root: string | undefined
  let context: Context | undefined
-@@ -303,6 +304,191 @@ describe('real Loader composition', () => {
+@@ -96,6 +97,27 @@ async function upgrade(port: number, path: string): Promise<ReturnType<typeof co
+   return socket
+ }
+ 
++/** Open one raw upgrade request; resolve with every byte received before the server tears the connection down. */
++async function tornUpgrade(port: number, path: string): Promise<string> {
++  const socket = connect(port, '127.0.0.1')
++  // A server-side reset is the fixture outcome, not a failure.
++  socket.on('error', () => {})
++  await once(socket, 'connect')
++  let bytes = ''
++  socket.on('data', (chunk) => { bytes += String(chunk) })
++  const closed = once(socket, 'close')
++  socket.write([
++    `GET ${path} HTTP/1.1`,
++    `Host: 127.0.0.1:${String(port)}`,
++    'Connection: Upgrade',
++    'Upgrade: dsh-test',
++    '',
++    '',
++  ].join('\r\n'))
++  await closed
++  return bytes
++}
++
+ describe('real Loader composition', () => {
+   it('applies gzip only to eligible socket-backed HTTP responses', { timeout: 60_000 }, async () => {
+     expect(HttpServer.Config({ host: '127.0.0.1', port: 0 })).toEqual({
+@@ -303,6 +325,209 @@ describe('real Loader composition', () => {
      await expect(request(port, '/probe')).rejects.toThrow()
    })
  
@@ -339,27 +1813,6 @@ index b7ac506b17..996cc17347 100644
 +    const loaded = await loadComposition()
 +    const server = loaded.webServer
 +    const port = server.port
-+
-+    /** Open one raw upgrade request; resolve with every byte received before the server tears the connection down. */
-+    const tornUpgrade = async (path: string): Promise<string> => {
-+      const socket = connect(port, '127.0.0.1')
-+      // A server-side reset is the fixture outcome, not a failure.
-+      socket.on('error', () => {})
-+      await once(socket, 'connect')
-+      let bytes = ''
-+      socket.on('data', (chunk) => { bytes += String(chunk) })
-+      const closed = once(socket, 'close')
-+      socket.write([
-+        `GET ${path} HTTP/1.1`,
-+        `Host: 127.0.0.1:${String(port)}`,
-+        'Connection: Upgrade',
-+        'Upgrade: dsh-test',
-+        '',
-+        '',
-+      ].join('\r\n'))
-+      await closed
-+      return bytes
-+    }
 +
 +    server.register({
 +      kind: 'exact',
@@ -412,7 +1865,7 @@ index b7ac506b17..996cc17347 100644
 +    expect(vetoed).toMatchObject({ status: 401, body: 'Unauthorized' })
 +    expect(vetoed.headers.get('content-type')).toBe('text/plain; charset=utf-8')
 +    expect((await request(port, '/no/such/route')).status).toBe(401)
-+    expect(await tornUpgrade('/upgrade-principal')).not.toContain('101')
++    expect(await tornUpgrade(port, '/upgrade-principal')).not.toContain('101')
 +    releaseVeto()
 +
 +    // Custom veto fields: status and body each override independently of
@@ -436,13 +1889,52 @@ index b7ac506b17..996cc17347 100644
 +      return Promise.reject(new Error('guard rejection'))
 +    })
 +    expect(await request(port, '/api/echo-principal')).toMatchObject({ status: 401, body: 'Unauthorized' })
-+    expect(await tornUpgrade('/upgrade-principal')).not.toContain('101')
++    expect(await tornUpgrade(port, '/upgrade-principal')).not.toContain('101')
 +    releaseFailing()
 +
 +    // With the seat released, registrability is restored and handlers read
 +    // no principal again.
 +    expect(() => server.registerGuard(() => ({ allow: true }))).not.toThrow()
 +    expect((await request(port, '/api/echo-principal')).body).toBe('{}')
++  })
++
++  it('propagates the guard principal to request-scoped continuations on both carriers', { timeout: 60_000 }, async () => {
++    const loaded = await loadComposition()
++    const server = loaded.webServer
++    const port = server.port
++    const seen: unknown[] = []
++
++    server.register({
++      kind: 'exact',
++      path: '/api/echo-scoped',
++      handler: async (req, res) => {
++        // A deliberate async hop: the reader must survive await boundaries.
++        await new Promise((resolve) => { setImmediate(resolve) })
++        seen.push(['http', currentRequestPrincipal(), server.principalOf(req)])
++        res.writeHead(200).end()
++      },
++    })
++    server.registerUpgrade({
++      path: '/upgrade-scoped',
++      handler: (req, socket) => {
++        seen.push(['upgrade', currentRequestPrincipal(), server.principalOf(req)])
++        socket.destroy()
++      },
++    })
++
++    const release = server.registerGuard(() => ({ allow: true, principal: { subject: 'scoped-alice' } }))
++    await fetch(`http://127.0.0.1:${String(port)}/api/echo-scoped`)
++    await tornUpgrade(port, '/upgrade-scoped')
++
++    expect(seen).toEqual([
++      ['http', { subject: 'scoped-alice' }, { subject: 'scoped-alice' }],
++      ['upgrade', { subject: 'scoped-alice' }, { subject: 'scoped-alice' }],
++    ])
++
++    // No principal attached: the reader reports undefined on the same path.
++    release()
++    await fetch(`http://127.0.0.1:${String(port)}/api/echo-scoped`)
++    expect(seen.at(-1)).toEqual(['http', undefined, undefined])
 +  })
 +
 +  it('drops an upgrade socket destroyed while the guard decision is pending', { timeout: 60_000 }, async () => {

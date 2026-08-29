@@ -9,7 +9,7 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly PATCH_FILE="${SCRIPT_DIR}/deepseek-harness.dsh-request-guard.patch"
 readonly BASELINE_COMMIT="cd5ef8148158c3a752a658978873241fdf8e2bbc"
-readonly BRANCH_TIP_COMMIT="1bd06a979894483b12489d551f3d1ad8581c6351"
+readonly BRANCH_TIP_COMMIT="d56a51edb79c7cd55ae6bc6183662c7a37030a32"
 
 usage() {
   cat <<EOF
