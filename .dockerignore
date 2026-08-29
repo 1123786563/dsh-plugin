@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+**/lib
+.git
+.worktrees
+.mimosa
+.playwright-mcp
+.superpowers
+.DS_Store
+**/*.tsbuildinfo
+.env
+**/.env
