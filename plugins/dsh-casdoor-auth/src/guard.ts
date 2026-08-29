@@ -66,6 +66,20 @@ export interface WebRequestPrincipal {
 }
 
 /**
+ * Runtime narrowing of a guard-supplied request principal: the guard is the
+ * only attacher, but hooks receive it as `unknown` (the host treats it as
+ * opaque), so consumers fail-closed on anything but the exact three-field
+ * shape with non-empty identifiers and an all-string roles array.
+ */
+export function isWebRequestPrincipal(principal: unknown): principal is WebRequestPrincipal {
+  if (typeof principal !== 'object' || principal === null) return false
+  const candidate = principal as { tenantId?: unknown, userId?: unknown, roles?: unknown }
+  return typeof candidate.tenantId === 'string' && candidate.tenantId.length > 0
+    && typeof candidate.userId === 'string' && candidate.userId.length > 0
+    && Array.isArray(candidate.roles) && candidate.roles.every(role => typeof role === 'string')
+}
+
+/**
  * Produce the guard callback for the host's guard seat. A verifiable
  * DshIdentityToken admits with the three-field request principal; else the
  * launch-token query parameter admits bare (the stock browser-auth bootstrap
