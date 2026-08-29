@@ -7,11 +7,11 @@
 | 项 | 值 |
 | --- | --- |
 | patch 文件 | `deepseek-harness.dsh-request-guard.patch` |
-| 宿主分支 | `dsh-request-guard`（4 commits：webserver 守卫 + 请求主体载体 + 载体实证 + 会话过滤钩子）：<br>`1bd06a9798` feat(webserver): add optional request guard hook<br>`aeb1a1eef5` feat(webserver): propagate guard principal into request continuations<br>`29b9b97d35` test(gateway): prove request principal reaches remote methods end to end<br>`d56a51edb7` feat(session-controller): add optional session access filter hooks |
-| 分支 tip | `d56a51edb79c7cd55ae6bc6183662c7a37030a32` |
+| 宿主分支 | `dsh-request-guard`（8 commits：webserver 守卫 + 请求主体载体 + 载体实证 + 会话过滤钩子 + mux 帧过滤钩子③及会话引用表装配）：<br>`1bd06a9798` feat(webserver): add optional request guard hook<br>`aeb1a1eef5` feat(webserver): propagate guard principal into request continuations<br>`29b9b97d35` test(gateway): prove request principal reaches remote methods end to end<br>`d56a51edb7` feat(session-controller): add optional session access filter hooks<br>`5ae4e192d4` feat(gateway): add optional per-connection forwarded-event frame filter<br>`0de0f27e9c` test(gateway): assert denied clients never see cancel frames<br>`59f194b4af` feat(session-controller): filter control frames and declare session references<br>`9cf768e302` feat(api-remotes): declare session references for forwarded events |
+| 分支 tip | `9cf768e3021030af274754e39bcca1d0f05d0fce` |
 | 基线 commit（upstream master） | `cd5ef8148158c3a752a658978873241fdf8e2bbc` |
-| 变更规模 | 19 文件，+1423/−73（`packages/api/gateway` 载体重入 + `packages/api/session-controller` 准入原语 + `packages/host/webserver` 守卫与载体传播，含实证测试） |
-| 导出命令 | `git -C /Users/wuyongjun/trea/deepseek-harness diff cd5ef8148158c3a752a658978873241fdf8e2bbc..d56a51edb79c7cd55ae6bc6183662c7a37030a32` |
+| 变更规模 | 33 文件，+2602/−97（`packages/api/gateway` 载体重入 + 事件帧过滤、`packages/api/session-controller` 准入原语 + 控制帧过滤与会话引用表、`packages/api/remotes` 引用表装配、`packages/host/webserver` 守卫与载体传播，含实证测试） |
+| 导出命令 | `git -C /Users/wuyongjun/trea/deepseek-harness diff cd5ef8148158c3a752a658978873241fdf8e2bbc..9cf768e3021030af274754e39bcca1d0f05d0fce` |
 
 patch 文件保持**纯净 git diff 输出**（首行即 `diff --git`，无任何前置注释——统一 diff 中 `#` 行不是合法头，会导致 `git apply` 拒绝）；溯源元数据放在本表与 `apply.sh` 的常量里。
 
