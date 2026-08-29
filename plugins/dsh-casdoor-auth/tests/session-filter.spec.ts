@@ -1,8 +1,8 @@
 import { Context } from '@deepseek-ai/cordis'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { InMemoryTenantSessionStore, MultiTenantService } from 'dsh-multi-tenant'
 import { isWebRequestPrincipal } from '../src/guard.ts'
-import { createSessionFilterHooks } from '../src/session-filter.ts'
+import { applySessionFilter, createSessionFilterHooks } from '../src/session-filter.ts'
 import type { SessionFilterDeps, SessionFilterHooksLike } from '../src/session-filter.ts'
 import type { WebRequestPrincipal } from '../src/guard.ts'
 
@@ -155,5 +155,55 @@ describe('isWebRequestPrincipal', () => {
     expect(isWebRequestPrincipal({ tenantId: 'acme', userId: 'alice', roles: 'dsh-admin' })).toBe(false)
     expect(isWebRequestPrincipal({ tenantId: 'acme', userId: '', roles: [] })).toBe(false)
     expect(isWebRequestPrincipal({ tenantId: 'acme', userId: 'alice', roles: ['ok', 42] })).toBe(false)
+  })
+})
+
+describe('applySessionFilter', () => {
+  let multiTenant: MultiTenantService
+
+  beforeEach(async () => {
+    const ctx = new Context()
+    await ctx.plugin(InMemoryTenantSessionStore)
+    await ctx.plugin(MultiTenantService)
+    multiTenant = ctx.multiTenant
+    await multiTenant.claimSession('sa1', alice)
+    await multiTenant.claimSession('sb1', bob)
+  })
+
+  const deps = (): SessionFilterDeps => ({
+    listSessionsByOwner: p => multiTenant.listSessionsByOwner(p),
+    canAccessSession: (p, sessionId) => multiTenant.canAccessSession(p, sessionId),
+  })
+
+  it('registers both hooks on the sessionController seat and forwards its disposer', () => {
+    const hostDispose = vi.fn()
+    const register = vi.fn(() => hostDispose)
+    const release = applySessionFilter({ registerSessionFilter: register }, deps(), ['dsh-admin'])
+    expect(register).toHaveBeenCalledTimes(1)
+    const hooks = register.mock.calls[0][0] as SessionFilterHooksLike
+    expect(typeof hooks.listFilter).toBe('function')
+    expect(typeof hooks.accessCheck).toBe('function')
+    release()
+    expect(hostDispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('hands the seat hooks that actually enforce visibility', async () => {
+    let captured: SessionFilterHooksLike | undefined
+    applySessionFilter(
+      { registerSessionFilter: (hooks: SessionFilterHooksLike) => { captured = hooks; return () => {} } },
+      deps(),
+      ['dsh-admin'],
+    )
+    const rows = [{ sessionId: 'sa1' }, { sessionId: 'sb1' }]
+    await expect(captured!.listFilter!(alice, rows)).resolves.toEqual([{ sessionId: 'sa1' }])
+    await expect(captured!.accessCheck!(alice, 'sb1')).resolves.toBe(false)
+    await expect(captured!.accessCheck!(admin, 'sb1')).resolves.toBe(true)
+  })
+
+  it('fails loud when the host core predates the session-filter seat (stale patch)', () => {
+    const message = /dsh-request-guard\.patch/
+    expect(() => applySessionFilter({}, deps(), ['dsh-admin'])).toThrow(message)
+    expect(() => applySessionFilter(undefined, deps(), ['dsh-admin'])).toThrow(message)
+    expect(() => applySessionFilter({ registerSessionFilter: 'not-a-function' }, deps(), ['dsh-admin'])).toThrow(message)
   })
 })

@@ -22,6 +22,11 @@ describe('resolveConfig', () => {
     expect(resolveConfig(undefined).guardEnabled).toBe(false)
     expect(resolveConfig({ guardEnabled: true }).guardEnabled).toBe(true)
   })
+
+  it("defaults adminRoles to the gateway's default role name and reads the operator override", () => {
+    expect(resolveConfig(undefined).adminRoles).toEqual(['dsh-admin'])
+    expect(resolveConfig({ adminRoles: ['ops-god', 'dsh-admin'] }).adminRoles).toEqual(['ops-god', 'dsh-admin'])
+  })
 })
 
 const base: Config = resolveConfig({

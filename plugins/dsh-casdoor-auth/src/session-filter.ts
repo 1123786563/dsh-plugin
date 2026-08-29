@@ -83,3 +83,47 @@ export function createSessionFilterHooks(
 function isAdmin(principal: WebRequestPrincipal, adminRoles: readonly string[]): boolean {
   return principal.roles.some(role => adminRoles.includes(role))
 }
+
+/**
+ * Minimal face of the host sessionController's session-filter seat. The
+ * pinned devDependencies predate the seat, so presence is a runtime feature
+ * check — the same stance as the WebRequestGuardSeat face in guard.ts.
+ */
+export interface SessionFilterSeat {
+  /**
+   * Claim the single session-hook seat; a second registration is rejected
+   * by the host because two access policies cannot compose.
+   * @param hooks - list and admission callbacks.
+   * @returns the disposer releasing the seat.
+   */
+  registerSessionFilter(hooks: SessionFilterHooksLike): () => void
+}
+
+/**
+ * Wire the session visibility hooks into the host sessionController's single
+ * sessionFilter seat.
+ *
+ * @param sessionController - the host sessionController service (feature-checked: a core without the seat carries a stale patch).
+ * @param deps - the multi-tenant ownership kernel face.
+ * @param adminRoles - role names exempting a principal from filtering.
+ * @returns the seat disposer.
+ * @throws when the service exposes no registerSessionFilter seat — the operator must (re-)apply scripts/host-patches/deepseek-harness.dsh-request-guard.patch.
+ */
+export function applySessionFilter(
+  sessionController: unknown,
+  deps: SessionFilterDeps,
+  adminRoles: readonly string[],
+): () => void {
+  if (!isSessionFilterSeat(sessionController)) {
+    throw new Error(
+      'casdoor-auth session visibility filter is enabled but the host sessionController exposes no registerSessionFilter seat; '
+        + 'apply scripts/host-patches/deepseek-harness.dsh-request-guard.patch (current version) to the host core',
+    )
+  }
+  return sessionController.registerSessionFilter(createSessionFilterHooks(deps, adminRoles))
+}
+
+/** Runtime feature check for the session-filter seat. */
+function isSessionFilterSeat(service: unknown): service is SessionFilterSeat {
+  return typeof (service as { registerSessionFilter?: unknown } | null | undefined)?.registerSessionFilter === 'function'
+}
