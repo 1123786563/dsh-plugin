@@ -68,9 +68,9 @@ cd <deepseek-harness> && pnpm dsh web
 | `/api/*`（fetch/XHR） | 401 JSON | 转发；SPA 内置 watcher 把过期 401 变为跳转 |
 | WebSocket 升级（`/api/events.*`） | 401 拒绝升级 | 双向 pipe 转发 |
 | 特权方法（15 个，见下） | 401 | 非特权角色 403；特权角色转发 |
-| `*.webmanifest` | 转发（浏览器按规范不带 cookie 拉取 manifest，公开描述符免鉴权） | 转发 |
+| `*.webmanifest`（与一切静态资产同） | 401（fetch）/ 302 → `/login`（导航） | 转发（注入 `x-dsh-identity`） |
 
-白名单（不验会话）：`/healthz`、`/.well-known/jwks.json`、`/login`、`/casdoor/callback`、`/logout`、`*.webmanifest`。
+网关自答路径（不验会话，也绝不转发）：`/healthz`、`/.well-known/jwks.json`、`/login`、`/casdoor/callback`、`/logout`；其余一切请求（含 `*.webmanifest`）必过会话门禁，转发时逐请求铸造身份令牌。
 
 ## 多组织（租户）登录入口
 
