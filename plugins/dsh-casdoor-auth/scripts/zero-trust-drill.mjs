@@ -27,13 +27,10 @@
  *     client bundle) with the web profile linked into $RT/dsh-home — the
  *     drill runs `pnpm dsh web --no-open` there itself.
  *
- * Private-port note: the drill pins the private port numerically through
- * the profile user patch layer ($RT/dsh-home/profiles/web/cordis.patch.yml,
- * applied after every bundle layer) for a deterministic isolated port it
- * owns itself. The DSH_CASDOOR_DSH_PORT env seam is usable too (the bundle
- * patch coerces it with Number()), but the drill leaves it unset so the
- * isolated port never rides on env coordination — same isolated 38081
- * semantics, no file outside $RT touched.
+ * Private-port note: the isolated private port is injected through the
+ * plugin's env seam DSH_CASDOOR_DSH_PORT (cordis.patch.yml coerces it with
+ * Number(), so the webserver schema accepts it) — no profile patch layer is
+ * written and no file outside $RT is touched.
  *
  * Usage:
  *   node plugins/dsh-casdoor-auth/scripts/zero-trust-drill.mjs \
@@ -53,7 +50,7 @@
 
 import { spawn } from 'node:child_process'
 import { generateKeyPairSync, createPrivateKey, randomBytes, webcrypto } from 'node:crypto'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import net from 'node:net'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -456,27 +453,16 @@ function startGateway (rt) {
 
 /** Spawn the isolated second dsh instance in the rehearsal worktree. */
 function startDsh (rt, hostWorktree, publicKeyPem, withGuard) {
-  // Numeric private port through the profile user patch layer: the drill
-  // owns its deterministic isolated port there (see the header note). The
-  // user patch is applied after every bundle layer, so the literal wins.
-  const profilePatch = join(rt, 'dsh-home', 'profiles', 'web', 'cordis.patch.yml')
-  writeFileSync(profilePatch, [
-    '# written by zero-trust-drill.mjs: numeric private port 38081',
-    '# (drill-owned deterministic isolated port; DSH_CASDOOR_DSH_PORT stays unset)',
-    '- id: webserver',
-    '  config:',
-    '    host: 127.0.0.1',
-    `    port: ${PRIVATE_PORT}`,
-    '',
-  ].join('\n'))
+  // Private port through the plugin's env seam: cordis.patch.yml coerces
+  // DSH_CASDOOR_DSH_PORT with Number(), so the webserver schema accepts it.
   const env = {
     ...process.env,
     DSH_HOME: join(rt, 'dsh-home'),
+    DSH_CASDOOR_DSH_PORT: String(PRIVATE_PORT),
     DSH_CASDOOR_GATEWAY_JWKS_URL: `${GATEWAY}/.well-known/jwks.json`,
     DSH_CASDOOR_GATEWAY_DATA_DIR: join(rt, 'gw-data'),
     DSH_CASDOOR_IDENTITY_PUBLIC_KEY: publicKeyPem,
   }
-  delete env.DSH_CASDOOR_DSH_PORT
   if (withGuard) env.DSH_CASDOOR_GUARD = '1'
   else delete env.DSH_CASDOOR_GUARD
   return spawnChild('dsh', 'pnpm', ['dsh', 'web', '--no-open'], { cwd: hostWorktree, env })
@@ -503,6 +489,7 @@ async function runNegativeMatrix (label, gatewayKeyDer, fakeKeyDer) {
     { label: 'GET /export/...', method: 'GET', path: '/export/session-drill.json' },
     { label: 'GET /no/such/route（未注册路径）', method: 'GET', path: '/no/such/route' },
   ]
+  let httpArmsOk = true
   for (const item of cases) {
     const res = await timedFetch(`${UPSTREAM}${item.path}`, {
       method: item.method,
@@ -519,28 +506,35 @@ async function runNegativeMatrix (label, gatewayKeyDer, fakeKeyDer) {
       // (401 + text/plain) and, whenever a length is present, byte exactness.
       const expected = String(Buffer.byteLength(GUARD_HINT))
       const length = res.headers.get('content-length')
-      const lengthOk = length === null || length === expected
+      const ok = res.status === 401 && contentType.startsWith('text/plain')
+        && (length === null || length === expected)
+      httpArmsOk = httpArmsOk && ok
       record(`直连 ${item.label} → 401 固定文案（HEAD 无 body，content-length 如有须逐字）`,
-        res.status === 401 && contentType.startsWith('text/plain') && lengthOk,
+        ok,
         `HTTP ${String(res.status)} ${contentType} content-length=${length ?? 'absent'}（文案 ${expected}B）`)
       continue
     }
     const body = await res.text().catch(() => '')
+    const ok = isGuardVeto(res.status, body, contentType)
+    httpArmsOk = httpArmsOk && ok
     record(`直连 ${item.label} → 401 固定文案`,
-      isGuardVeto(res.status, body, contentType),
+      ok,
       `HTTP ${String(res.status)} ${contentType} body=${JSON.stringify(body.slice(0, 40))}`)
   }
 
   // WS direct connect on the registered downlink path: raw upgrade without
   // a credential, and with a fake one. The guard's upgrade veto destroys the
-  // socket before any 101.
+  // socket before any 101 — with the HTTP matrix green the port is provably
+  // alive and guarded, so additionally require the zero-byte teardown: a
+  // dead port (ECONNREFUSED → ended='error') must not keep this arm green.
   for (const arm of [
     { label: 'WS 直连 /api/remote.mux 无 token', headers: {} },
     { label: 'WS 直连 /api/remote.mux 伪 token', headers: { [IDENTITY_HEADER]: 'not.a.jwt' } },
   ]) {
     const probe = await wsProbe(PRIVATE_PORT, WS_PATH, arm.headers)
-    record(`${arm.label} → 无 101 且连接被拆`,
-      !probe.firstLine.startsWith('HTTP/1.1 101'),
+    const tornZeroByte = probe.ended === 'close' && probe.bytes === 0
+    record(`${arm.label} → 无 101 且零字节拆连`,
+      !probe.firstLine.startsWith('HTTP/1.1 101') && (!httpArmsOk || tornZeroByte),
       `${probe.ended} ${String(probe.bytes)}B "${probe.firstLine}"`)
   }
 

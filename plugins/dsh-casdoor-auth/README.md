@@ -109,7 +109,7 @@ node plugins/dsh-casdoor-auth/scripts/zero-trust-drill.mjs \
 
 - `--rt` **必须**与上面 link 插件时的 `$RT` 同一目录（隔离 web profile 落在 `$RT/dsh-home`，脚本不重建它）。
 - drill 自起网关（`GATEWAY_IDENTITY_TTL_SEC=5` 压缩 fail-closed 等待）与 dsh 第二实例（`pnpm dsh web --no-open`，`DSH_CASDOOR_GUARD=1` + 钉公钥），结束自动杀尽子进程并 `rm -rf $RT`。
-- 私口 38081 由 drill 写入 profile 用户 patch 层（`$RT/dsh-home/profiles/web/cordis.patch.yml`，数值端口，在所有 bundle 层之后生效）：drill 改走 profile 用户 patch 数值端口以获得确定隔离端口——`DSH_CASDOOR_DSH_PORT` env 通道已带 `Number()` 强转、同样可用，但隔离端口直接钉在隔离 profile 里不依赖 env 传递，drill 因此不设该环境变量。
+- 私口 38081 经 `DSH_CASDOOR_DSH_PORT` 环境通道注入（`cordis.patch.yml` 已作 `Number()` 强转，env 字符串端口不再被 webserver schema 拒绝）；drill 不写 profile 用户 patch 层，隔离与清理契约不变。
 - 退出码 0 且末行 `ALL PASS`＝全部通过；任一步骤失败输出逐项 `❌` 并退出非零。`GET /manifest.webmanifest` 经网关匿名转发被守卫 401 为已知开放问题（见「已知边界」），仅记录不计失败。
 
 ### 清理（宿主零残留核验）
