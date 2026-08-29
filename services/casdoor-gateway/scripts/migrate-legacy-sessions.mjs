@@ -24,7 +24,7 @@
 
 import { existsSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const DEFAULT_DB_RELATIVE_PATH = join('.dsh-multi-tenant', 'session-ownership.sqlite')
 /** ADR-0005 Q12=a: the ops principal owns migrated legacy sessions. */
@@ -269,8 +269,8 @@ async function main () {
     fatal('compiled migration modules not found under lib/ — run: pnpm --dir services/casdoor-gateway build')
     return
   }
-  const { planMigration } = await import(`file://${planModule}`)
-  const { applyMigration } = await import(`file://${applyModule}`)
+  const { planMigration } = await import(pathToFileURL(planModule).href)
+  const { applyMigration } = await import(pathToFileURL(applyModule).href)
 
   if (!existsSync(db)) {
     fatal(`session_owners database not found: ${db} (pass --db; see scripts/MIGRATION-RUNBOOK.md)`)

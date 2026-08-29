@@ -8,6 +8,8 @@
 
 ## 工具
 
+除特别注明外，本文所有命令均在 **dsh-plugin 仓库根**执行（`--dir` 与脚本路径均为仓库根相对）；仅步骤②的宿主命令在 `<deepseek-harness>` checkout 下执行。
+
 ```bash
 pnpm --dir services/casdoor-gateway build          # 脚本 import lib/ 编译产物，先 build
 node services/casdoor-gateway/scripts/migrate-legacy-sessions.mjs [options]
@@ -34,20 +36,23 @@ docker compose up -d casdoor postgres    # casdoor @ 127.0.0.1:8001
 ② **起带 patch 宿主与网关**。带 patch 宿主 = 装了 `dsh-multi-tenant` 插件的 deepseek-harness（bundle patch 把 webserver 挪到 `127.0.0.1:38080`）：
 
 ```bash
-cd <deepseek-harness> && DSH_MULTI_TENANT_STARTER=1 dsh web   # 宿主 cwd 即归属 DB 所在
-pnpm --dir services/casdoor-gateway dev                       # 网关 @ 127.0.0.1:3080
+# 终端 A，cwd = <deepseek-harness> checkout 根（宿主 cwd 即归属 DB 所在，--db 路径据此取）
+cd <deepseek-harness> && DSH_MULTI_TENANT_STARTER=1 dsh web
+
+# 终端 B，cwd = dsh-plugin 仓库根（本文其余命令同此基准）
+pnpm --dir services/casdoor-gateway dev    # 网关 @ 127.0.0.1:3080
 ```
 
 **`--db` 实际路径取法**：归属库默认落在**宿主进程 cwd** 下——`<宿主cwd>/.dsh-multi-tenant/session-ownership.sqlite`（或宿主启动时的 `DSH_MULTI_TENANT_SQLITE_PATH`）。演练时把这个绝对路径显式传给 `--db`，不要依赖 CLI 的 cwd 默认值。
 
 ③ **造有主会话**：经网关 UI（`http://127.0.0.1:3080` 登录后新建会话）或 RPC（cookie 登录后 `POST /api/session.create`），以 `acme/alice` 与 `globex/bob` 各建 ≥2 个会话。multi-tenant 的 `onSessionCreated` 钩子会立即把新会话 claim 给创建者——这些就是「有主」行。
 
-④ **制造无主夹具**：直接 SQL 删两行 `session_owners`（模拟门禁启用前的存量）：
+④ **制造无主夹具**：直接 SQL 删两行 `session_owners`（模拟门禁启用前的存量）。句柄带 `timeout: 5000`——演练期宿主在跑、可能持瞬时写锁，与 CLI 真跑的 `busy_timeout=5000` 对齐（node:sqlite 默认 timeout 0，遇锁即报 `database is locked`）：
 
 ```bash
 node -e "const{DatabaseSync}=require('node:sqlite');\
-const db=new DatabaseSync('<宿主cwd>/.dsh-multi-tenant/session-ownership.sqlite');\
-console.log(db.prepare(\"DELETE FROM session_owners WHERE session_id IN (?,?,)\").run('<sid-1>','<sid-2>'));db.close()"
+const db=new DatabaseSync('<宿主cwd>/.dsh-multi-tenant/session-ownership.sqlite',{timeout:5000});\
+console.log(db.prepare(\"DELETE FROM session_owners WHERE session_id IN (?,?)\").run('<sid-1>','<sid-2>'));db.close()"
 ```
 
 只读验证（删后剩余行）：
@@ -61,7 +66,7 @@ console.log(db.prepare('SELECT session_id,tenant_id,user_id FROM session_owners 
 ⑤ **dry-run 断言清单**：
 
 ```bash
-MIGRATION_PASSWORD='dsh-Admin1' node scripts/migrate-legacy-sessions.mjs --dry-run \
+MIGRATION_PASSWORD='dsh-Admin1' node services/casdoor-gateway/scripts/migrate-legacy-sessions.mjs --dry-run \
   --db <宿主cwd>/.dsh-multi-tenant/session-ownership.sqlite --gateway http://127.0.0.1:3080
 ```
 
@@ -77,7 +82,7 @@ MIGRATION_PASSWORD='dsh-Admin1' node scripts/migrate-legacy-sessions.mjs --dry-r
 
 ## 演练记录
 
-### 2026-02-XX CLI 冒烟（不起全栈；宿主模式网关 + stub 上游 + 临时夹具）
+### 2026-08-30 CLI 冒烟（不起全栈；宿主模式网关 + stub 上游 + 临时夹具）
 
 环境：casdoor@8001（docker）真实登录链路；网关 `lib/server.js` 宿主模式 @3199（临时数据目录）；上游为按宿主 fetch-carrier 帧形状作答的 stub（`/api/session.list` 固定返回 4 会话）；归属库为临时 SQLite：预置 `owned-acme`（acme/alice）与 `ops-claimed`（dsh-ops/dsh-admin）两行，`legacy-1`/`legacy-2` 仅存在于清单（无主）。
 
