@@ -79,6 +79,24 @@ async function endpointReachable(endpoint: string): Promise<boolean> {
 
 const LIVE_REACHABLE = await endpointReachable(LIVE_ENDPOINT)
 
+/**
+ * Collection-time meter-sink probe for the full-chain case: an endpoint can
+ * answer prices/customers/ingest 2xx yet serve no meters, in which case the
+ * meter leg of the real chain can never materialize rows there.
+ */
+async function meterSinkLive(endpoint: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${endpoint}/api/v1/meters`, { signal: AbortSignal.timeout(1_500) })
+    if (!response.ok) return false
+    const list = await response.json() as { data?: unknown[] }
+    return (list.data?.length ?? 0) > 0
+  } catch {
+    return false
+  }
+}
+
+const METER_SINK_LIVE = LIVE_REACHABLE && await meterSinkLive(LIVE_ENDPOINT)
+
 /** Unique-per-run prefix so subjects never collide across runs or fixtures. */
 const RUN_NONCE = randomUUID().slice(0, 8)
 
@@ -127,8 +145,6 @@ export interface TenantFixture {
   readonly presetId: string
   readonly member: TokenedIdentity
   readonly manager: TokenedIdentity
-  readonly token: string
-  readonly managerToken: string
 }
 
 /** The wired acceptance stack: routes, pipeline chain, and per-tenant actors. */
@@ -187,8 +203,6 @@ export async function makeAcceptanceFixture(options: { endpoint?: string, subjec
       presetId: `${prefix}-preset-${label}-${nonce}`,
       member: { tenantId, userId: `${label}-member`, displayName: `Tenant ${label} member`, roles: [], token },
       manager: { tenantId, userId: `${label}-manager`, displayName: `Tenant ${label} manager`, roles: ['owner'], token: managerToken },
-      token,
-      managerToken,
     }
   }
   const tenantA = makeTenant('a')
@@ -208,10 +222,10 @@ export async function makeAcceptanceFixture(options: { endpoint?: string, subjec
     [operator.identity.tenantId]: `${prefix}-subject-ops-${nonce}`,
   }
   const identities = new Map<string, RouteIdentity>([
-    [tenantA.token, tenantA.member],
-    [tenantA.managerToken, tenantA.manager],
-    [tenantB.token, tenantB.member],
-    [tenantB.managerToken, tenantB.manager],
+    [tenantA.member.token, tenantA.member],
+    [tenantA.manager.token, tenantA.manager],
+    [tenantB.member.token, tenantB.member],
+    [tenantB.manager.token, tenantB.manager],
     [operator.token, operator.identity],
   ])
   const auth: RouteAuth = {
@@ -492,7 +506,7 @@ describe('tenant budget: visibility, edit rights, over-line warning', () => {
   it('manager sets and sees the budget; a plain member is read-only (403 on PUT)', async () => {
     const fx = await makeAcceptanceFixture()
     try {
-      const put = await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.managerToken, body: { monthlyBudgetCny: 10 } })
+      const put = await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.manager.token, body: { monthlyBudgetCny: 10 } })
       expect(put.status).toBe(200)
       expect(put.body.canManageBudget).toBe(true)
       expect(put.body.monthlyBudgetCny).toBe(10)
@@ -505,7 +519,7 @@ describe('tenant budget: visibility, edit rights, over-line warning', () => {
       const memberPut = await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.member.token, body: { monthlyBudgetCny: 99 } })
       expect(memberPut.status).toBe(403)
       expect(memberPut.body).toEqual({ ok: false, error: 'forbidden' })
-      const after = await fx.request({ method: 'GET', path: '/api/openmeter/me/budget', token: fx.tenantA.managerToken })
+      const after = await fx.request({ method: 'GET', path: '/api/openmeter/me/budget', token: fx.tenantA.manager.token })
       expect(after.body.monthlyBudgetCny).toBe(10)
     } finally {
       fx.dispose()
@@ -515,8 +529,8 @@ describe('tenant budget: visibility, edit rights, over-line warning', () => {
   it('B has zero visibility of A budget: B side stays unconfigured with no A figures', async () => {
     const fx = await makeAcceptanceFixture()
     try {
-      await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.managerToken, body: { monthlyBudgetCny: 10 } })
-      const bBudget = await fx.request({ method: 'GET', path: '/api/openmeter/me/budget', token: fx.tenantB.managerToken })
+      await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.manager.token, body: { monthlyBudgetCny: 10 } })
+      const bBudget = await fx.request({ method: 'GET', path: '/api/openmeter/me/budget', token: fx.tenantB.manager.token })
       expect(bBudget.status).toBe(200)
       expect(bBudget.body.availability).toBe('unconfigured')
       expect('monthlyBudgetCny' in bBudget.body).toBe(false)
@@ -531,7 +545,7 @@ describe('tenant budget: visibility, edit rights, over-line warning', () => {
     const fx = await makeAcceptanceFixture()
     try {
       fx.appendPricedRow(fx.tenantA.subject, 500)
-      const put = await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.managerToken, body: { monthlyBudgetCny: 10 } })
+      const put = await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.manager.token, body: { monthlyBudgetCny: 10 } })
       expect(put.status).toBe(200)
       expect(put.body.availability).toBe('ready')
       expect(put.body.monthlyBudgetCny).toBe(10)
@@ -545,11 +559,11 @@ describe('tenant budget: visibility, edit rights, over-line warning', () => {
   it('PUT validation: non-positive amount → invalid-amount; extra keys (subject attempt) → invalid-body', async () => {
     const fx = await makeAcceptanceFixture()
     try {
-      const zero = await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.managerToken, body: { monthlyBudgetCny: 0 } })
+      const zero = await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.manager.token, body: { monthlyBudgetCny: 0 } })
       expect(zero.status).toBe(400)
       expect(zero.body).toEqual({ ok: false, error: 'invalid-amount' })
 
-      const spoof = await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.managerToken, body: { monthlyBudgetCny: 5, subject: fx.tenantB.subject } })
+      const spoof = await fx.request({ method: 'PUT', path: '/api/openmeter/me/budget', token: fx.tenantA.manager.token, body: { monthlyBudgetCny: 5, subject: fx.tenantB.subject } })
       expect(spoof.status).toBe(400)
       expect(spoof.body).toEqual({ ok: false, error: 'invalid-body' })
     } finally {
@@ -583,11 +597,11 @@ describe('operator surface boundary', () => {
     const fx = await makeAcceptanceFixture()
     try {
       for (const path of ['/api/openmeter/operator/customers', '/api/openmeter/operator/grants', '/api/openmeter/operator/block', '/api/openmeter/operator/bindings']) {
-        const read = await fx.request({ method: 'GET', path, token: fx.tenantA.managerToken })
+        const read = await fx.request({ method: 'GET', path, token: fx.tenantA.manager.token })
         expect(read.status).toBe(403)
         expect(read.body).toEqual({ ok: false, error: 'forbidden' })
       }
-      const write = await fx.request({ method: 'POST', path: '/api/openmeter/operator/block', token: fx.tenantA.managerToken, body: { customerKey: fx.tenantB.subject, blocked: true } })
+      const write = await fx.request({ method: 'POST', path: '/api/openmeter/operator/block', token: fx.tenantA.manager.token, body: { customerKey: fx.tenantB.subject, blocked: true } })
       expect(write.status).toBe(403)
       expect(fx.store.isManuallyBlocked(fx.tenantB.subject)).toBe(false)
     } finally {
@@ -772,15 +786,20 @@ describe.skipIf(!LIVE_REACHABLE)('OpenMeter real chain at 127.0.0.1:8888 (forwar
     return rows.reduce((sum, row) => sum + Number(row?.value ?? 0), 0)
   }
 
-  // TODO: skipped — the endpoint currently answering on 127.0.0.1:8888 is a
-  // partial local shim, not the OpenMeter fork: ingest and customers answer
-  // 2xx (customer ids read "…-LOCAL-SHIM-CUSTOMER"), but GET /api/v1/meters
-  // returns an empty list and the dsh_llm_tokens meter query always answers
-  // `{}`, so the meter leg of this chain can never materialize rows. Verified
-  // 2026-02-14 by direct probe (see t1-report.md). Re-enable once the real
-  // fork (compose stack) serves the meter sink. The ingest, entitlement, and
-  // gate/block legs stay covered by the case below.
-  it.skip('A and B meter through the real chain and stay isolated end to end', async () => {
+  // TODO: skipped automatically while the endpoint's meter sink is absent —
+  // `METER_SINK_LIVE` above probes GET /api/v1/meters at collection time.
+  // The endpoint currently answering on 127.0.0.1:8888 is a partial local
+  // shim, not the OpenMeter fork: ingest and customers answer 2xx (customer
+  // ids read "…-LOCAL-SHIM-CUSTOMER"), but the meters list is empty and the
+  // dsh_llm_tokens meter query always answers `{}`, so the meter leg of this
+  // chain can never materialize rows there. Verified 2026-08-30 by direct
+  // probe (see t1-report.md). Once the real fork (compose stack) serves a
+  // non-empty meters list, this case un-skips itself. Until then the legs
+  // that DO work against the shim are covered by the case below:
+  // customers, entitlements, grants, gate/block, and the WAL → forwarder →
+  // ingest drain (asserting the WAL empties; meter-row materialization and
+  // ready-state summaries remain fork-only).
+  it.skipIf(!METER_SINK_LIVE)('A and B meter through the real chain and stay isolated end to end', async () => {
     const fx = await makeAcceptanceFixture({ endpoint: LIVE_ENDPOINT })
     try {
       await ensurePriceOverride()
@@ -825,6 +844,14 @@ describe.skipIf(!LIVE_REACHABLE)('OpenMeter real chain at 127.0.0.1:8888 (forwar
       await ensurePriceOverride()
       await ensureCustomer(fx, fx.tenantA.subject, 50)
       await ensureCustomer(fx, fx.tenantB.subject, 50)
+
+      // Ingest leg (works against the shim: /api/v1/ingest answers 2xx) —
+      // the seeded event flows WAL → forwarder → ingest and the WAL empties.
+      // Meter-row materialization stays unasserted: the shim's meter query
+      // always answers `{}`.
+      await fx.seedUsage(fx.tenantA, { seq: 1, inputTokens: 20, outputTokens: 5 })
+      await fx.forwarder.drain()
+      expect(fx.wal.pending()).toHaveLength(0)
 
       expect(await fx.gate.allow(fx.tenantA.subject)).toBe(true)
       expect(await fx.gate.allow(fx.tenantB.subject)).toBe(true)
