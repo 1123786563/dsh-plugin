@@ -16,7 +16,7 @@
 - id: webserver
   config:
     host: 127.0.0.1
-    port: !!js process.env.DSH_CASDOOR_DSH_PORT ?? 38080
+    port: !!js process.env.DSH_CASDOOR_DSH_PORT ? Number(process.env.DSH_CASDOOR_DSH_PORT) : 38080
 
 - insert:
     - id: casdoor-auth

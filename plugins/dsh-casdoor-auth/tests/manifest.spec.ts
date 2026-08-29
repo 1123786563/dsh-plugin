@@ -30,10 +30,21 @@ describe('plugin manifest', () => {
 })
 
 describe('cordis.patch.yml', () => {
+  // Golden string pins the whole ternary: env values are strings, so the old
+  // `?? 38080` seam handed the webserver schema (z.natural().max(65535)) a
+  // string port and dsh boot failed; '' must take the default branch because
+  // Number('') === 0 would request a random port.
+  const portSeam = 'port: !!js process.env.DSH_CASDOOR_DSH_PORT ? Number(process.env.DSH_CASDOOR_DSH_PORT) : 38080'
+
   it('moves the webserver onto the loopback private port', () => {
     expect(patch).toContain('- id: webserver')
     expect(patch).toContain('host: 127.0.0.1')
-    expect(patch).toContain("process.env.DSH_CASDOOR_DSH_PORT ?? 38080")
+    expect(patch).toContain(portSeam)
+  })
+
+  it('coerces DSH_CASDOOR_DSH_PORT to a number (golden, regression-pinned)', () => {
+    expect(patch).toContain(portSeam)
+    expect(patch).not.toContain('process.env.DSH_CASDOOR_DSH_PORT ?? 38080')
   })
 
   it('inserts the plugin row with env-driven defaults', () => {

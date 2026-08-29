@@ -50,12 +50,13 @@ pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
 | `identityHeader` | `x-dsh-identity` | DshIdentityToken 携带头 |
 | `issuer` / `audience` | `dsh-casdoor-gateway` / `dsh-casdoor-auth` | 令牌校验目标 |
 | `basePath` | `/_dsh-multi-tenant` | Web 桥挂载路径 |
+| `controlPage` | `true` | 是否在 `basePath` 提供网桥控制页（身份/准入状态页） |
 | `mcpServers` / `mcpServersByTenant` | `[]` / `{}` | 租户 MCP 服务器（stdio/streamable-http），per-tenant 覆盖全局 |
 | `credentials` | `{}` | Principal 静态凭据（name→secret），MCP 凭据绑定解析用 |
 | `gatewayDataDir` | `~/.dsh-casdoor-gateway`（env `DSH_CASDOOR_GATEWAY_DATA_DIR`） | 网关数据目录：插件把本进程 webserver launch token 以 0600 写入其中（`webserver-token.json`），网关 UpstreamAuth 读取它铸造 dsh 浏览器认证 cookie |
 | `guardEnabled` | `false`（env `DSH_CASDOOR_GUARD`，`1`/`true` 开、其余关） | zero-trust 私口守卫开关（逃生门：默认关＝门禁前行为零差异）；开则认领宿主唯一守卫席位，无有效 DshIdentityToken / launch token 的一切 HTTP/WS 请求 401 固定文案，宿主需已应用 dsh-request-guard patch（缺失则激活大声失败），语义与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md) |
 
-端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`；演练（rehearsal drill）另起隔离私口 `38081` 的第二实例，不占用正式 `38080`（该环境通道现产出字符串端口，drill 改走 profile patch 数值端口，全流程见[演练手册](#演练手册zero-trust-私口守卫-rehearsal-drill)）。
+端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，值经 `Number()` 强转：空串视同未设回落 `38080`，非数值得 `NaN` 由 webserver schema 大声拒绝；改口需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`；演练（rehearsal drill）另起隔离私口 `38081` 的第二实例，不占用正式 `38080`（全流程见[演练手册](#演练手册zero-trust-私口守卫-rehearsal-drill)）。
 
 ## 演练手册（zero-trust 私口守卫 rehearsal drill）
 
@@ -134,7 +135,7 @@ rm -rf "$RT"   # 泄漏时才存在；重跑前按「搭建」step 2 重新 link
 
 - **stock Web UI 无租户隔离**（上游 [issue #41](https://github.com/GuoMonth/dsh-multi-tenant/issues/41)）：登录后是共享工作区；租户隔离发生在 Agent 层（会话归属 claim-once + Principal 绑定）。
 - 本机进程直连 `38080` 绕过网关的旁路已由 zero-trust 私口守卫关闭（开启 `guardEnabled` 后，无有效凭证的直连一律 401；逃生门与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)）。
-- `manifest.webmanifest` 经网关匿名转发会被守卫 401：PWA 安装元数据失效，UI 不受影响（浏览器按规范拉取 manifest 不带 cookie，即使登录态亦然）；取消网关侧匿名转发特例属 #19 正文领地（开放问题）。
+- `manifest.webmanifest` 经网关匿名转发会被守卫 401：PWA 安装元数据失效，UI 不受影响（浏览器拉取 manifest 不带 cookie——W3C [Web Application Manifest](https://www.w3.org/TR/appmanifest/#fetching-a-manifest) 规定 manifest 请求以 credentials mode "omit" 发出，登录态亦然）；取消网关侧匿名转发特例属 #19 正文领地（开放问题）。
 - 特权方法（settings/credentials/agentPreset 等 15 个）在网关层要求 casdoor 角色 `dsh-admin`。
 
 ## 文档
