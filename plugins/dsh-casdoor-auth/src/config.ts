@@ -57,6 +57,12 @@ export interface Config {
    * guard seat and vetoes every request without a valid credential.
    */
   guardEnabled: boolean
+  /**
+   * Role names exempting a request principal from session visibility
+   * filtering (full list, full admission incl. ownerless sessions);
+   * mirrors the gateway's GATEWAY_ADMIN_ROLES default.
+   */
+  adminRoles: readonly string[]
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -72,6 +78,7 @@ export const DEFAULT_CONFIG: Config = {
   credentials: {},
   gatewayDataDir: '~/.dsh-casdoor-gateway',
   guardEnabled: false,
+  adminRoles: ['dsh-admin'],
 }
 
 // Schemastery's inferred object-schema types do not line up with interfaces
@@ -129,6 +136,9 @@ export const Config: Schema<Config> = Schema.object({
   ),
   guardEnabled: Schema.boolean().default(DEFAULT_CONFIG.guardEnabled).description(
     'Zero-trust private-port guard: veto every webserver request (HTTP and WebSocket upgrade) that carries no valid DshIdentityToken or launch token; false keeps the pre-gate behavior. Requires a host core patched with scripts/host-patches/deepseek-harness.dsh-request-guard.patch.',
+  ),
+  adminRoles: Schema.array(String).default([...DEFAULT_CONFIG.adminRoles]).description(
+    'Role names exempt from session visibility filtering (see everything, open anything); keep in sync with the gateway GATEWAY_ADMIN_ROLES.',
   ),
 }) as unknown as Schema<Config>
 

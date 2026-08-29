@@ -39,6 +39,7 @@ import { Config, mcpServersFor, resolveConfig } from './config.ts'
 import type { Config as ConfigShape } from './config.ts'
 import { applyGuard } from './guard.ts'
 import { IdentityVerifier, type CasdoorIdentity } from './identity.ts'
+import { applySessionFilter } from './session-filter.ts'
 import { inject401Watcher, WATCHER_SCRIPT } from './watcher.ts'
 
 /** Cordis plugin name; keep this stable after publishing. */
@@ -97,13 +98,21 @@ function expandHome(path: string): string {
 
 export { Config }
 export type { ConfigShape }
-export { GUARD_HINT, applyGuard, createCasdoorRequestGuard } from './guard.ts'
+export { GUARD_HINT, applyGuard, createCasdoorRequestGuard, isWebRequestPrincipal } from './guard.ts'
 export type {
   WebRequestGuard,
   WebRequestGuardDecision,
   WebRequestGuardSeat,
   WebRequestPrincipal,
 } from './guard.ts'
+export { applySessionFilter, createSessionFilterHooks } from './session-filter.ts'
+export type {
+  SessionAccessCheckLike,
+  SessionFilterDeps,
+  SessionFilterHooksLike,
+  SessionFilterSeat,
+  SessionListFilterLike,
+} from './session-filter.ts'
 export { IdentityVerifier }
 export type { CasdoorIdentity }
 export { inject401Watcher, WATCHER_SCRIPT }
@@ -141,6 +150,26 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
       const releaseGuard = applyGuard(scoped.webServer, entry, service, () => launchToken.current)
       scoped.effect(() => releaseGuard, 'casdoor-auth: zero-trust private-port guard')
     }
+  })
+
+  // Session visibility (ADR-0005): with the guard active, claim the host
+  // sessionController's single sessionFilter seat and enforce tenant-scoped
+  // list/admission over the multi-tenant ownership kernel, with the
+  // configured admin roles exempt. guardEnabled=false keeps zero seat
+  // interaction — without the guard no principal ever materializes, and a
+  // registered filter would deny every session API call fail-closed.
+  ctx.inject(['sessionController', 'multiTenant'], scoped => {
+    if (!entry.guardEnabled) return
+    const multiTenant = scoped.multiTenant
+    const release = applySessionFilter(
+      (scoped as unknown as { sessionController?: unknown }).sessionController,
+      {
+        listSessionsByOwner: principal => multiTenant.listSessionsByOwner(principal),
+        canAccessSession: (principal, sessionId) => multiTenant.canAccessSession(principal, sessionId),
+      },
+      entry.adminRoles,
+    )
+    scoped.effect(() => release, 'casdoor-auth: session visibility filter')
   })
 
   // dsh >= 0.1.2-alpha browser auth: the webserver authenticates every

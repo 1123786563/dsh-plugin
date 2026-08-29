@@ -55,6 +55,9 @@ pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
 | `credentials` | `{}` | Principal 静态凭据（name→secret），MCP 凭据绑定解析用 |
 | `gatewayDataDir` | `~/.dsh-casdoor-gateway`（env `DSH_CASDOOR_GATEWAY_DATA_DIR`） | 网关数据目录：插件把本进程 webserver launch token 以 0600 写入其中（`webserver-token.json`），网关 UpstreamAuth 读取它铸造 dsh 浏览器认证 cookie |
 | `guardEnabled` | `false`（env `DSH_CASDOOR_GUARD`，`1`/`true` 开、其余关） | zero-trust 私口守卫开关（逃生门：默认关＝门禁前行为零差异）；开则认领宿主唯一守卫席位，无有效 DshIdentityToken / launch token 的一切 HTTP/WS 请求 401 固定文案，宿主需已应用 dsh-request-guard patch（缺失则激活大声失败），语义与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md) |
+| `adminRoles` | `['dsh-admin']` | 会话可见性豁免角色名列表：请求主体 roles 与之有交集则列表不过滤、任意会话（含无主存量）可开；与网关 `GATEWAY_ADMIN_ROLES` 保持同步，语义见 [ADR-0005](./docs/adr/0005-tenant-scoped-session-visibility.md) |
+
+`guardEnabled` 开启时，插件同时认领宿主 sessionController 的唯一 sessionFilter 座位并装上**会话可见性过滤**（ADR-0005）：会话列表/搜索只保留当前请求主体自己认领的会话，一切带 sessionId 的方法（history/prompt/fork/export/cancel 等）先过归属准入，未知/无主/跨租户/同租户跨用户一律 403 fail-closed，`adminRoles` 命中者全量豁免——前端零改动。宿主核心若只有守卫座而无 sessionFilter 座（旧版 patch），过滤静默不生效：请重新应用当前版 `scripts/host-patches/deepseek-harness.dsh-request-guard.patch`。
 
 端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，值经 `Number()` 强转：空串视同未设回落 `38080`，非数值得 `NaN` 由 webserver schema 大声拒绝；改口需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`；演练（rehearsal drill）另起隔离私口 `38081` 的第二实例，不占用正式 `38080`（全流程见[演练手册](#演练手册zero-trust-私口守卫-rehearsal-drill)）。
 
