@@ -2,7 +2,7 @@
 
 **状态：已接受（2026-08-29 守卫已落地，本 ADR 为落地补记）**
 
-ADR-0004 三件套中第 1 钩子（请求守卫）的插件侧消费记录：守卫实现见 `src/guard.ts`（`createCasdoorRequestGuard` / `applyGuard`），经 bundle patch 的 `guardEnabled` 开关装配（默认关）。本 ADR 四节：§1 宿主钩子语义（Agent Note 本体）、§2 patch 溯源与升级循环、§3 本轨设计裁定、§4 m1 定名记录。
+ADR-0004 三件套中第 1 钩子（请求守卫）的插件侧消费记录：守卫实现见 `src/guard.ts`（`createCasdoorRequestGuard` / `applyGuard`），经 bundle patch 的 `guardEnabled` 开关装配（默认关）。本 ADR 四节：§1 宿主钩子语义（Agent Note 本体）、§2 patch 溯源与升级循环（含 #20 多 commit 溯源、准入记录 R1、WS 载体偏差与 abort/close 边界）、§3 本轨设计裁定、§4 m1 定名记录。
 
 ## §1 宿主钩子语义（Agent Note）
 
@@ -16,11 +16,17 @@ ADR-0004 三件套中第 1 钩子（请求守卫）的插件侧消费记录：�
 - **决策窗口竞态**：守卫决策 pending 期间被拆的 upgrade socket 不进 upgraded set——其 close 事件已发，等它会挂死 teardown。
 - **未配置守卫 = 宿主行为与 upstream 完全一致**：席位空时每个请求 `{ allow: true }`，无可观察差异；本 patch 对不打开 `guardEnabled` 的部署是零影响的。
 
-## §2 patch 溯源与升级循环
+## §2 patch 溯源与升级循环（含 #20 多 commit 溯源、准入记录 R1、WS 载体偏差与 abort/close 边界）
 
-宿主分支 `dsh-request-guard`（单 commit `feat(webserver): add optional request guard hook`）：tip `1bd06a979894483b12489d551f3d1ad8581c6351`，基线（upstream master）`cd5ef8148158c3a752a658978873241fdf8e2bbc`，规模 5 文件 +329/−38（`packages/host/webserver/` 下 README×3 + src + tests）。本仓副本 `scripts/host-patches/deepseek-harness.dsh-request-guard.patch` 保持纯净 git diff，溯源元数据在状态表与 `apply.sh` 常量里。
+宿主分支 `dsh-request-guard`（4 commits：webserver 守卫 + 请求主体载体 + 载体实证 + 会话过滤钩子）：tip `d56a51edb79c7cd55ae6bc6183662c7a37030a32`，基线（upstream master）`cd5ef8148158c3a752a658978873241fdf8e2bbc`，规模 19 文件 +1423/−73（`packages/api/gateway` + `packages/api/session-controller` + `packages/host/webserver`，逐 commit 列表见状态表）。本仓副本 `scripts/host-patches/deepseek-harness.dsh-request-guard.patch` 保持纯净 git diff，溯源元数据在状态表与 `apply.sh` 常量里。
 
 `apply.sh` 幂等语义：`--check` 先做 `git apply --check --reverse` 探测——已应用输出 `already applied, skipping` 退出 0；未应用则正向预演，基线不符/冲突退出 1 并提示基线 commit；实际应用后再次 reverse 探测确认、输出应用文件数，不自动 commit。宿主升级 = 宿主仓 `git fetch origin && git rebase origin/master` + 跑宿主门禁确认钩子行为未回归 + 以与生成时完全相同的 diff 命令重导出覆盖副本，同步状态表与 `apply.sh` 常量。完整循环与当前状态见 [`scripts/host-patches/README.md`](../../../../scripts/host-patches/README.md) 状态表。
+
+#20 准入记录（R1）：ADR-0005 所述 `session.export` GET 旁路在基线 `cd5ef8148158c3a752a658978873241fdf8e2bbc` 不存在，不虚构端点；#20 以可复用准入原语 `SessionController.assertSessionAccess` 的结构性覆盖落地，同一判定供未来直达路由消费。
+
+WS 载体偏差（计划 §2.1 计划内 fallback 实证）：原设「wrap handleUpgrade」传播 principal 被实证驳斥——ws 升级后 message 监听在 socket 原生读上下文触发，wrap 在任何帧到达前已退出。变体实现：`RemoteStreamMuxServer.handleUpgrade` 新增可选 `RemoteStreamScope` seam（恒等默认，既有调用方不变）+ gateway mux 每消息 `runWithRequestPrincipal` 重入。HTTP 载体仍走 webserver 收口（`aeb1a1e`），WS 载体经此 seam，双载体均经真实链路测试 + 突变验证（`29b9b97`）。
+
+边界声明：WS mux 流的 abort/close 路径不在 #20 准入作用域内——准入只管首帧前 admit，流建立后的中止与关闭语义由既有 mux 生命周期承担。
 
 ## §3 本轨设计裁定
 
