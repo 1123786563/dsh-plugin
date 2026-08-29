@@ -44,14 +44,14 @@
   - `createSessionFilterHooks(deps: SessionFilterDeps, adminRoles: readonly string[]): SessionFilterHooksLike`
   - `isWebRequestPrincipal(principal: unknown): principal is WebRequestPrincipal`
 
-- [ ] **Step 1: 写失败测试** `tests/session-filter.spec.ts`：真实 `MultiTenantService`（`new Context()` + `ctx.plugin(InMemoryTenantSessionStore)` + `ctx.plugin(MultiTenantService)`，照 multi-tenant 自有测试范式）。fixture：acme/alice（sa1,sa2）、globex/bob（sb1,sb2）、acme/carol（sc1）、`s-unclaimed`（永不 claim = 无主存量）、admin principal（dsh-ops/dsh-ops-admin，roles:['dsh-admin']）。矩阵：
+- [x] **Step 1: 写失败测试** `tests/session-filter.spec.ts`：真实 `MultiTenantService`（`new Context()` + `ctx.plugin(InMemoryTenantSessionStore)` + `ctx.plugin(MultiTenantService)`，照 multi-tenant 自有测试范式）。fixture：acme/alice（sa1,sa2）、globex/bob（sb1,sb2）、acme/carol（sc1）、`s-unclaimed`（永不 claim = 无主存量）、admin principal（dsh-ops/dsh-ops-admin，roles:['dsh-admin']）。矩阵：
   - listFilter：alice 于 [sa1,sb1,sa2,sb2,sc1] 得 [sa1,sa2]（同时覆盖跨租户+同租户跨用户；断言保持引用与顺序）；admin 得原数组 `toBe(items)`；畸形 principal（缺 roles/roles 非数组/userId 空串/字符串主体）→ `[]`；无自己会话的有效主体 → `[]`；空 items → `[]`。
   - accessCheck：alice→sa1 true；→sb1 false（跨租户）；→sc1 false（同租户跨用户）；→'forged-unknown' false；→'s-unclaimed' false；admin→sb1 true、→'s-unclaimed' true（无主对豁免可见）；畸形 principal→false。
   - adminRoles 为自定义 ['ops-god'] 时 roles:['ops-god'] 豁免、roles:['dsh-admin'] 不豁免。
-- [ ] **Step 2: 跑测试确认失败**：`cd plugins/dsh-casdoor-auth && pnpm vitest run tests/session-filter.spec.ts` → FAIL（模块不存在）。
-- [ ] **Step 3: 实现** `src/guard.ts` 加 `isWebRequestPrincipal`（tenantId/userId 非空 string、roles 为 string[] 且元素皆 string）；`src/session-filter.ts` 实现 `createSessionFilterHooks`：listFilter = 畸形→`[]`；admin→原样返回；否则 `new Set(await listSessionsByOwner)` 过滤。accessCheck = 畸形→false；admin→true；否则 `canAccessSession`。
-- [ ] **Step 4: 跑测试确认通过**：同 Step 2 → PASS 全绿。
-- [ ] **Step 5: 门禁 + commit**：`pnpm typecheck && pnpm test && pnpm build` 全绿后 `git commit -m "feat(casdoor-auth): tenant-scoped session visibility hooks (listFilter + accessCheck + admin exemption)"`。
+- [x] **Step 2: 跑测试确认失败**：`cd plugins/dsh-casdoor-auth && pnpm vitest run tests/session-filter.spec.ts` → FAIL（模块不存在）。
+- [x] **Step 3: 实现** `src/guard.ts` 加 `isWebRequestPrincipal`（tenantId/userId 非空 string、roles 为 string[] 且元素皆 string）；`src/session-filter.ts` 实现 `createSessionFilterHooks`：listFilter = 畸形→`[]`；admin→原样返回；否则 `new Set(await listSessionsByOwner)` 过滤。accessCheck = 畸形→false；admin→true；否则 `canAccessSession`。
+- [x] **Step 4: 跑测试确认通过**：同 Step 2 → PASS 全绿。
+- [x] **Step 5: 门禁 + commit**：`pnpm typecheck && pnpm test && pnpm build` 全绿后 `git commit -m "feat(casdoor-auth): tenant-scoped session visibility hooks (listFilter + accessCheck + admin exemption)"`。
 
 ### Task 2: 配置、接线与文档（adminRoles + applySessionFilter + index 注册 + README）
 
@@ -67,19 +67,19 @@
 - Consumes: Task 1 的 `createSessionFilterHooks`/`SessionFilterHooksLike`；`entry.adminRoles`；`scoped.multiTenant`（真实服务）与 `scoped.sessionController`（unknown，经 `applySessionFilter` 特性检查）。
 - Produces: `applySessionFilter`、`SessionFilterSeat`、`SessionFilterHooksLike` 从包入口导出。
 
-- [ ] **Step 1: 写失败测试**：config 默认 `adminRoles` 为 `['dsh-admin']`；`applySessionFilter` 对 `{ registerSessionFilter: vi.fn(...) }` 假座注册并返回释放器、释放器转发宿主 disposer、递入的 hooks 与 `createSessionFilterHooks` 同源（listFilter 实际过滤）；对无 `registerSessionFilter` 的对象抛错且错误信息含补丁路径 `scripts/host-patches/deepseek-harness.dsh-request-guard.patch`。
-- [ ] **Step 2: 确认失败** → FAIL。
-- [ ] **Step 3: 实现** config/adminRoles + applySessionFilter + index.ts inject 注册块（guardEnabled=false 早退，零座接触）+ 导出 + README 段落。
-- [ ] **Step 4: 确认通过**：`pnpm vitest run tests/session-filter.spec.ts tests/config.spec.ts` → PASS；`pnpm typecheck && pnpm test && pnpm build` 全绿。
-- [ ] **Step 5: commit** `git commit -m "feat(casdoor-auth): wire session visibility hooks into host sessionController seat"`。
+- [x] **Step 1: 写失败测试**：config 默认 `adminRoles` 为 `['dsh-admin']`；`applySessionFilter` 对 `{ registerSessionFilter: vi.fn(...) }` 假座注册并返回释放器、释放器转发宿主 disposer、递入的 hooks 与 `createSessionFilterHooks` 同源（listFilter 实际过滤）；对无 `registerSessionFilter` 的对象抛错且错误信息含补丁路径 `scripts/host-patches/deepseek-harness.dsh-request-guard.patch`。
+- [x] **Step 2: 确认失败** → FAIL。
+- [x] **Step 3: 实现** config/adminRoles + applySessionFilter + index.ts inject 注册块（guardEnabled=false 早退，零座接触）+ 导出 + README 段落。
+- [x] **Step 4: 确认通过**：`pnpm vitest run tests/session-filter.spec.ts tests/config.spec.ts` → PASS；`pnpm typecheck && pnpm test && pnpm build` 全绿。
+- [x] **Step 5: commit** `git commit -m "feat(casdoor-auth): wire session visibility hooks into host sessionController seat"`。
 
 ### Task 3: 全量门禁与验收对照
 
 **Files:** 无新改动（只跑门禁 + 勾选计划/台账）。
 
-- [ ] **Step 1**: `cd plugins/dsh-casdoor-auth && pnpm typecheck && pnpm build && pnpm test`。
-- [ ] **Step 2**: 仓库级 `pnpm -r typecheck && pnpm -r build && pnpm -r test`（沿前轮先例，记录各包计数；与 main 基线对比无回归）。
-- [ ] **Step 3**: 对照 Issue #22 验收清单逐项在台账记录证据（列表隔离两类、403 准入 fail-closed、admin 全量、前端零改动=引用保序断言 + 库存 UI 渲染验证归 #21/#26 演练票的说明）。
+- [x] **Step 1**: `cd plugins/dsh-casdoor-auth && pnpm typecheck && pnpm build && pnpm test`。
+- [x] **Step 2**: 仓库级 `pnpm -r typecheck && pnpm -r build && pnpm -r test`（沿前轮先例，记录各包计数；与 main 基线对比无回归）。
+- [x] **Step 3**: 对照 Issue #22 验收清单逐项在台账记录证据（列表隔离两类、403 准入 fail-closed、admin 全量、前端零改动=引用保序断言 + 库存 UI 渲染验证归 #21/#26 演练票的说明）。
 
 ## 非目标（显式）
 - `onSessionCreated` 自动认领 → #23；mux 帧过滤 → #24/#26；存量迁移 → #27；网关面任何改动 → #19/#21。
