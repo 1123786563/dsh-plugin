@@ -60,7 +60,7 @@ pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
 
 ## 演练手册（zero-trust 私口守卫 rehearsal drill）
 
-[`scripts/zero-trust-drill.mjs`](./scripts/zero-trust-drill.mjs) 对**隔离实例**复演守卫全行为：直连负路径矩阵（12 条 HTTP 路径/方法全 401 固定文案、WS 直连无 101 被拆、自铸攻击 token 四臂）、经网关正向五步（真实 casdoor 登录 / index / JS 资产 / RPC / WS 101）、fail-closed（短 TTL token 随网关死亡失效、矩阵复跑、重启后会话不掉线）、逃生门三步。脚本自起网关与 dsh 子进程、用后自清；全程只碰 `38081`/`30820`/`8001`，不触碰宿主 3080 live 实例与 `38080` 正式私口。
+[`scripts/zero-trust-drill.mjs`](./scripts/zero-trust-drill.mjs) 对**隔离实例**复演守卫全行为：直连负路径矩阵（12 条 HTTP 路径/方法全 401 固定文案、WS 直连无 101 被拆、自铸攻击 token 四臂）、经网关正向五步（真实 casdoor 登录 / index / JS 资产 / RPC / WS 101）与 manifest 门禁双臂（未登录 → 网关自身 401 JSON、已登录 → 铸造转发 200）、fail-closed（短 TTL token 随网关死亡失效、矩阵复跑、重启后会话不掉线）、逃生门三步。脚本自起网关与 dsh 子进程、用后自清；全程只碰 `38081`/`30820`/`8001`，不触碰宿主 3080 live 实例与 `38080` 正式私口。
 
 ### 前置
 
@@ -112,7 +112,7 @@ node plugins/dsh-casdoor-auth/scripts/zero-trust-drill.mjs \
 - `--rt` **必须**与上面 link 插件时的 `$RT` 同一目录（隔离 web profile 落在 `$RT/dsh-home`，脚本不重建它）。
 - drill 自起网关（`GATEWAY_IDENTITY_TTL_SEC=5` 压缩 fail-closed 等待）与 dsh 第二实例（`pnpm dsh web --no-open`，`DSH_CASDOOR_GUARD=1` + 钉公钥），结束自动杀尽子进程并 `rm -rf $RT`。
 - 私口 38081 经 `DSH_CASDOOR_DSH_PORT` 环境通道注入（`cordis.patch.yml` 已作 `Number()` 强转，env 字符串端口不再被 webserver schema 拒绝）；drill 不写 profile 用户 patch 层，隔离与清理契约不变。
-- 退出码 0 且末行 `ALL PASS`＝全部通过；任一步骤失败输出逐项 `❌` 并退出非零。`GET /manifest.webmanifest` 经网关匿名转发被守卫 401 为已知开放问题（见「已知边界」），仅记录不计失败。
+- 退出码 0 且末行 `ALL PASS`＝全部通过；任一步骤失败输出逐项 `❌` 并退出非零。manifest 门禁为双臂断言：未登录 → 网关自身 401 JSON（不再匿名转发），已登录 → 铸造转发 200（见「已知边界」）。
 
 ### 清理（宿主零残留核验）
 
@@ -137,7 +137,7 @@ rm -rf "$RT"   # 泄漏时才存在；重跑前按「搭建」step 2 重新 link
 
 - **stock Web UI 无租户隔离**（上游 [issue #41](https://github.com/GuoMonth/dsh-multi-tenant/issues/41)）：登录后是共享工作区；租户隔离发生在 Agent 层（会话归属 claim-once + Principal 绑定）。
 - 本机进程直连 `38080` 绕过网关的旁路已由 zero-trust 私口守卫关闭（开启 `guardEnabled` 后，无有效凭证的直连一律 401；逃生门与裁定见 [ADR-0006](./docs/adr/0006-zero-trust-private-port-guard.md)）。
-- 未登录/无会话 cookie 时，`manifest.webmanifest` 经网关匿名转发（`isCredentiallessAsset` 特例）被守卫 401：PWA 安装元数据对该场景失效，UI 不受影响。按 HTML Standard [Link type "manifest"](https://html.spec.whatwg.org/multipage/links.html#link-type-manifest)，无 `crossorigin` 属性的 manifest link credentials mode 为 "same-origin"（同源登录态会带 cookie），此时走网关正常铸造转发而非匿名特例（登录态路径未验证）；取消网关侧匿名转发特例属 #19 正文领地（开放问题）。
+- `manifest.webmanifest` 与其他静态资产同权，网关匿名转发特例已随 #19 移除：未登录 → 网关自身 401 JSON（登录前 PWA 安装元数据不可得，UI 不受影响）；已登录 → 正常铸造转发 200。按 HTML Standard [Link type "manifest"](https://html.spec.whatwg.org/multipage/links.html#link-type-manifest)，无 `crossorigin` 属性的 manifest link credentials mode 为 "same-origin"（同源登录态会带 cookie），登录后臂即浏览器的真实路径。
 - 特权方法（settings/credentials/agentPreset 等 15 个）在网关层要求 casdoor 角色 `dsh-admin`。
 
 ## 文档
