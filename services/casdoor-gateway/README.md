@@ -7,6 +7,7 @@
 网关是根 compose 的 `casdoor-gateway` 服务（见根 `docker-compose.yml`）：
 
 ```bash
+mkdir -p ~/.dsh-casdoor-gateway             # bind 目录存在性：数据面（会话库/身钥/launch token）落这里
 cp .env.example .env                        # 填 CASDOOR_CLIENT_SECRET（与 init_data.json 一致；gitignored）
 docker compose up -d casdoor-gateway        # 仓库根；自动带起 casdoor + postgres
 ```
@@ -34,7 +35,7 @@ docker compose up -d casdoor-gateway        # 仓库根；自动带起 casdoor +
 docker compose stop casdoor-gateway
 ```
 
-> ⚠ **bind mount 形态下禁止 `docker compose down -v`**：`-v` 会把 `casdoor-data` 命名卷里的 casdoor 种子（连同 openmeter/nocobase 共享 PG 数据）一起清掉。门禁栈停/起一律用不带 `-v` 的 `down` / `up -d`（见下方演练 ladder）。
+> ⚠ **`docker compose down -v` 属破坏性操作**：清 casdoor 种子 + openmeter/nocobase 共享 PG 数据（网关身钥因 bind mount 幸存），仅在明确接受数据丢失时执行；日常停/起**绝不带 `-v`**——门禁栈停/起一律用不带 `-v` 的 `down` / `up -d`（见下方演练 ladder）。
 
 ## 常驻与自愈（launchd）
 
@@ -45,12 +46,12 @@ docker compose stop casdoor-gateway
 | [`deploy/com.dsh.web.plist`](./deploy/com.dsh.web.plist) | 私口 38080 dsh web 的开机自启 + 崩溃自愈 | `RunAtLoad` + `KeepAlive`（进程挂掉 launchd 立即拉起）+ `ProcessType: Background`；WorkingDirectory = dsh-request-guard patch worktree（live 运行时，勿清理） |
 | [`deploy/com.dsh.gate-stack.plist`](./deploy/com.dsh.gate-stack.plist) | 登录期保障容器门禁栈在位 | **一次性**（`RunAtLoad`，无 KeepAlive）：拉起 OrbStack → 循环等 `docker info` 可用（最多 120s，每 5s 一次）→ `docker compose up -d casdoor postgres casdoor-gateway` 幂等兜底；OrbStack 自启不可依赖时的兜底 |
 
-安装（先建日志目录——plist 的 StandardOut/ErrorPath 指向 `~/.dsh-doctor/logs/dsh-web.launchd.log`）：
+安装（先建日志目录——plist 的 StandardOut/ErrorPath 指向 `~/.dsh-doctor/logs/` 下各自的 `*.launchd.log`；**安装顺序：`com.dsh.gate-stack` 最后安装**——bootstrap 即触发 `RunAtLoad` 立即执行（会尝试以默认 3080 起 compose），切换窗口内先装 `com.dsh.web`）：
 
 ```bash
 mkdir -p ~/.dsh-doctor/logs
-launchctl bootstrap gui/$(id -u) services/casdoor-gateway/deploy/com.dsh.gate-stack.plist
-launchctl bootstrap gui/$(id -u) services/casdoor-gateway/deploy/com.dsh.web.plist
+launchctl bootstrap gui/$(id -u) services/casdoor-gateway/deploy/com.dsh.web.plist        # 先装：只自愈 dsh web，不触发容器
+launchctl bootstrap gui/$(id -u) services/casdoor-gateway/deploy/com.dsh.gate-stack.plist # 最后装：bootstrap 即 RunAtLoad 立即起门禁栈（默认 3080）
 ```
 
 卸载：
@@ -103,10 +104,10 @@ tail ~/.dsh-doctor/logs/dsh-web.launchd.log
 
 四档由轻到重逐级验证；每档含命令、验收断言与证据要求，执行后把证据登记进 [docs/restart-heal-drills.md](./docs/restart-heal-drills.md)（空表已备，后续轮填入）。
 
-**tier-1 容器自愈**——compose 栈整体停起（**绝不带 `-v`**）：
+**tier-1 容器自愈**——compose 栈整体停起（**绝不带 `-v`**；down 保持整项目，up 定向门禁栈——本机仅门禁栈常驻，多栈环境 down 会连带停 openmeter/nocobase，定向 up 避免把它们拉起）：
 
 ```bash
-docker compose down && docker compose up -d
+docker compose down && docker compose up -d casdoor postgres casdoor-gateway
 ```
 
 验收断言：① 容器自愈（`docker ps` 三容器 Up）；② 3080 登录链路通（`curl -sI http://127.0.0.1:3080/login` 302 → casdoor authorize）；③ **同一浏览器 cookie 会话存活**（bind mount 同一会话库，不重登直接可用）；④ 38080 全 401。证据：各命令输出摘要 + 免登验证记录。
@@ -150,13 +151,16 @@ tail -n 50 ~/.dsh-doctor/logs/dsh-web.launchd.log
 launchctl kickstart -k gui/$(id -u)/com.dsh.web
 ```
 
-**二级：回门禁前形态（dsh web 回 3080 直连）**——profile 移除 casdoor-auth bundle 后：
+**二级：回门禁前形态（dsh web 回 3080 直连）**——profile 移除 casdoor-auth bundle 后按序执行（顺序即防坑：① 先释放 3080，否则旧 web 起 3080 会 EADDRINUSE；③ 在 harness 目录执行，compose 命令必须留在仓库根）：
 
 ```bash
-launchctl bootout gui/$(id -u)/com.dsh.web          # 卸载 launchd 常驻
-cd /Users/wuyongjun/trea/deepseek-harness && pnpm dsh web    # 手动起 dsh web（回 3080 直连）
-docker compose stop casdoor-gateway                 # 停网关容器
+# 仓库根
+docker compose stop casdoor-gateway                 # ① 停网关容器，先释放 3080
+launchctl bootout gui/$(id -u)/com.dsh.web          # ② 卸载 launchd 常驻（释放 38080 私口）
+cd /Users/wuyongjun/trea/deepseek-harness && pnpm dsh web    # ③ 手动起旧形态 dsh web（回 3080 直连）
 ```
+
+③ 是前台长驻进程：另开终端 `curl -sI http://127.0.0.1:3080` 复核已回到直连形态。
 
 ## 开发模式（pnpm dev）
 
@@ -224,7 +228,7 @@ SaaS 场景给每个租户分发带 `org` 参数的入口 URL（或由你的租�
 
 ## casdoor 初始化（docker/init_data.json）
 
-首启空库时种子：组织 `acme`、`globex`、`dsh-ops`（平台管理员）；用户 `acme/alice`、`globex/bob`、`dsh-ops/dsh-admin`；应用 `dsh-gateway`（owner=admin、`isShared` 跨组织共享——这是"单应用多组织"的关键，redirect URI `http://127.0.0.1:3080/casdoor/callback` 与 `http://127.0.0.1:3099/casdoor/callback`，JWT/RS256）。重新种子需 `docker compose down -v`。改 `clientSecret` 时同步 `init_data.json` 与网关 env。多组织登录用 `组织/用户名` 形式。
+首启空库时种子：组织 `acme`、`globex`、`dsh-ops`（平台管理员）；用户 `acme/alice`、`globex/bob`、`dsh-ops/dsh-admin`；应用 `dsh-gateway`（owner=admin、`isShared` 跨组织共享——这是"单应用多组织"的关键，redirect URI `http://127.0.0.1:3080/casdoor/callback` 与 `http://127.0.0.1:3099/casdoor/callback`，JWT/RS256）。重新种子属破坏性操作：`docker compose down -v` 清 casdoor 种子 + openmeter/nocobase 共享 PG 数据（网关身钥因 bind mount 幸存），仅在明确接受数据丢失时执行；日常停/起绝不带 `-v`（见上方部署节警告）。改 `clientSecret` 时同步 `init_data.json` 与网关 env。多组织登录用 `组织/用户名` 形式。
 
 > **角色挂法（casdoor 姿势）**：用户角色必须挂在 **role 侧的 `users` 数组**（`"users": ["dsh-ops/dsh-admin"]`）才会进 JWT——写在用户 JSON 的 `roles` 字段里不会生效（运行时不读）。另外两个实测要点：共享应用的 ID token `aud` 是 `<clientId>-org-<组织>`（网关已按此校验）；`iss` 无尾斜杠（网关已归一化）。
 

@@ -5,6 +5,8 @@
      docker info 可用（最多 120s，每 5s 一次）→ compose up 幂等兜底（与
      restart: unless-stopped 双保险）。OrbStack 自启不可依赖时的兜底。
      一次性语义：RunAtLoad 且不加 KeepAlive（跑完即退出，不驻留）。
+     日志：StandardOut/ErrorPath → ~/.dsh-doctor/logs/gate-stack.launchd.log
+     （目录需先建，见 README 安装块）。
      本机单机部署形态：脚本内路径均为本机绝对路径，跨机器部署需按宿主调整。
      安装/卸载命令见 services/casdoor-gateway/README.md「常驻与自愈（launchd）」。 -->
 <plist version="1.0">
@@ -27,5 +29,9 @@ cd /Users/wuyongjun/trea/dsh-plugin &amp;&amp; docker compose up -d casdoor post
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/wuyongjun/.dsh-doctor/logs/gate-stack.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/wuyongjun/.dsh-doctor/logs/gate-stack.launchd.log</string>
 </dict>
 </plist>

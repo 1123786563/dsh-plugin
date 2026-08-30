@@ -50,4 +50,4 @@
 - 切换失败逃生门必须始终可用：guard 关（profile patch guardEnabled: false）→ 全回退（profile 移除插件 + launchctl bootout com.dsh.web + 旧形态重启）；写入排障手册与用户报告。
 - 运行锁由 cutover 脚本收尾删除（R7）；武装窗口内新唤醒见锁即跳过。
 - 每一步 live 操作前证据采集（前后状态、命令输出）进 SDD workspace，最终摘要进 repo 手册与 issue 评论。
-- 网关数据卷 bind mount 后**绝不** `docker compose down -v`（会清 casdoor 种子与网关身钥）。
+- 网关数据卷 bind mount 后**绝不** `docker compose down -v`（清 casdoor 种子 + openmeter/nocobase PG 卷；网关身钥因 bind mount 幸存）。

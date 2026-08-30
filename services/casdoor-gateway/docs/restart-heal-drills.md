@@ -6,7 +6,7 @@
 
 | 档位 | 执行命令 | 验收断言 |
 | --- | --- | --- |
-| tier-1 容器自愈 | `docker compose down && docker compose up -d`（绝不带 `-v`） | ① `docker ps` 三容器 Up；② 3080 登录链路 302 → casdoor authorize；③ 同一浏览器 cookie 会话存活（不重登直接可用）；④ 38080 全 401 |
+| tier-1 容器自愈 | `docker compose down && docker compose up -d casdoor postgres casdoor-gateway`（绝不带 `-v`；down 保持整项目、up 定向门禁栈——本机仅门禁栈常驻，多栈环境 down 会连带停 openmeter/nocobase，定向 up 避免把它们拉起） | ① `docker ps` 三容器 Up；② 3080 登录链路 302 → casdoor authorize；③ 同一浏览器 cookie 会话存活（不重登直接可用）；④ 38080 全 401 |
 | fail-closed 网关停用 | `docker compose stop casdoor-gateway` → 验 38080 → `docker compose start casdoor-gateway` | ① 停用期间 38080 仍全 401（私口守卫独立于网关在位）；② start 后自动回绿且登录会话不掉 |
 | tier-2 OrbStack 重启 | `osascript -e 'quit app "OrbStack"'` && `open -a OrbStack`，等 `docker info` 恢复后验同 tier-1 | 同 tier-1 全套（restart: unless-stopped 容器自愈 + 3080 链路 + 同 cookie 会话 + 38080 全 401） |
 | tier-3 整机重启 | 系统重启并登录后验同 tier-1 | 同 tier-1 全套 + launchd 自愈证据（`launchctl print gui/$(id -u)/com.dsh.web` running；gate-stack 已跑过；`tail ~/.dsh-doctor/logs/dsh-web.launchd.log`） |

@@ -17,9 +17,10 @@
 #   * higress — 官方安装脚本自管容器生命周期，走 services/higress-gateway/install.sh
 #   * plane   — dsh-plane 面向 Plane Cloud 或既有自托管实例，无本地依赖
 #
-# casdoor 首次启动（casdoor 库为空时）读取 init_data.json 种子；重新播种需
-# `docker compose down -v && docker compose up -d casdoor`（注意：-v 会连
-# openmeter/nocobase 等共享 PG 数据一起清掉）。
+# casdoor 首次启动（casdoor 库为空时）读取 init_data.json 种子。重播种/重置
+# 属破坏性操作（docker compose down -v）：清 casdoor 种子 + openmeter/
+# nocobase 共享 PG 数据（网关身钥因 bind mount 幸存），仅在明确接受数据
+# 丢失时执行；日常停/起绝不带 -v（见 casdoor-gateway README 部署节警告）。
 #
 # openmeter 镜像从源码构建（fork 的 v3 API 是 dsh-openmeter 必需，官方镜像没有）：
 # 源码取 /Users/wuyongjun/trea/openmeter（默认值 ../openmeter 相对仓库根解析，
@@ -75,9 +76,10 @@ services:
   # user 覆盖：镜像默认 USER node（uid 1000），读不了宿主 0600 token 文件、
   # 写不了宿主属主目录；501:20 为本机单机部署值（宿主 uid:gid），跨机器
   # 部署按宿主调整。
-  # ⚠ down -v 警告：bind mount 形态下 docker compose down -v 会把 casdoor-data
-  # 等命名卷连同 casdoor 种子一起清——禁止 down -v。镜像 slim 无 curl/wget，
-  # healthcheck 用 node 内置 fetch（同 nocobase 先例）。
+  # ⚠ down -v 属破坏性操作：清 casdoor 种子 + openmeter/nocobase 共享 PG
+  # 数据（网关身钥因 bind mount 幸存），仅在明确接受数据丢失时执行；日常
+  # 停/起绝不带 -v（见 casdoor-gateway README 部署节警告）。镜像 slim 无
+  # curl/wget，healthcheck 用 node 内置 fetch（同 nocobase 先例）。
   casdoor-gateway:
     build: { context: ., dockerfile: services/casdoor-gateway/Dockerfile }
     container_name: dsh-casdoor-gateway
@@ -174,7 +176,10 @@ services:
 
   postgres:
     # 单实例多租户：openmeter 与 nocobase 各用独立用户/角色 + 独立库
-    # （init 脚本只在数据卷为空时执行；改用户/库后需 down -v 重置）
+    # （init 脚本只在数据卷为空时执行；改用户/库后的重置走 down -v——破坏
+    # 性操作：清 casdoor 种子 + openmeter/nocobase 共享 PG 数据（网关身钥
+    # 因 bind mount 幸存），仅在明确接受数据丢失时执行；日常停/起绝不带
+    # -v，见 casdoor-gateway README 部署节警告）
     image: postgres:14.20-alpine3.23
     restart: unless-stopped
     environment:
