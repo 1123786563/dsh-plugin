@@ -108,6 +108,7 @@ export type {
 export { applySessionFilter, createSessionFilterHooks } from './session-filter.ts'
 export type {
   SessionAccessCheckLike,
+  SessionCreatedNotifierLike,
   SessionFilterDeps,
   SessionFilterHooksLike,
   SessionFilterSeat,
@@ -155,9 +156,14 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
   // Session visibility (ADR-0005): with the guard active, claim the host
   // sessionController's single sessionFilter seat and enforce tenant-scoped
   // list/admission over the multi-tenant ownership kernel, with the
-  // configured admin roles exempt. guardEnabled=false keeps zero seat
-  // interaction — without the guard no principal ever materializes, and a
-  // registered filter would deny every session API call fail-closed.
+  // configured admin roles exempt. Every stock-UI session creation (create
+  // or fork) is auto-claimed to the request principal — claim failures warn
+  // through the casdoor-auth logger and never rethrow — and registering the
+  // creation observer activates the host's creation admission: a
+  // principal-less create/fork (including launch-token-only requests) is
+  // vetoed 403 before any creation side effect. guardEnabled=false keeps
+  // zero seat interaction — without the guard no principal ever materializes,
+  // and a registered filter would deny every session API call fail-closed.
   ctx.inject(['sessionController', 'multiTenant'], scoped => {
     if (!entry.guardEnabled) return
     const multiTenant = scoped.multiTenant
@@ -166,6 +172,8 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
       {
         listSessionsByOwner: principal => multiTenant.listSessionsByOwner(principal),
         canAccessSession: (principal, sessionId) => multiTenant.canAccessSession(principal, sessionId),
+        claimSession: (principal, sessionId) => multiTenant.claimSession(sessionId, principal),
+        warn: message => scoped.logger('casdoor-auth').warn(message),
       },
       entry.adminRoles,
     )
