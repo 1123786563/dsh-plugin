@@ -100,6 +100,30 @@ launchctl print gui/$(id -u)/com.dsh.web
 tail ~/.dsh-doctor/logs/dsh-web.launchd.log
 ```
 
+**已知事件（2026-08-31 实测）**
+
+**A. 私口直连返回 200（非 401）——守卫形态被直连 web 挤掉**
+
+诊断：
+
+```bash
+lsof -nP -iTCP:38080 -sTCP:LISTEN            # 查监听 PID
+lsof -p <PID> | grep cwd                     # 看运行检出
+launchctl print gui/$(id -u)/com.dsh.web     # 会见 EADDRINUSE crash-loop
+```
+
+若为 harness 主检出（rc.2）或进程树含 zcode-cli，即无守卫代码的直连 web。处置：属唤醒链路（zcode-cli 自动拉 web）与守卫形态的结构冲突，按 restart-heal-drills.md「环境冲突记录」四选项决策；临时收口=停直连 web 后由 com.dsh.web KeepAlive 自动夺回。
+
+**B. 门禁栈整体冷起后 /login 500——网关 discovery 拒连粘滞（#53）**
+
+现象：`docker compose down && up -d` 三档后 healthz 200 但匿名 /login 500，网关日志 `connect ECONNREFUSED <casdoor>:8000`。根因：casdoor 无 healthcheck 门控、HTTP ~40s 才就绪，网关先起且 discovery 失败进程内粘滞。处置：
+
+```bash
+docker restart dsh-casdoor-gateway    # 实测 3s 回绿、/login 302 恢复、会话不掉
+```
+
+根治见 #53。
+
 ## 重启自愈演练 ladder（Issue #21）
 
 四档由轻到重逐级验证；每档含命令、验收断言与证据要求，执行后把证据登记进 [docs/restart-heal-drills.md](./docs/restart-heal-drills.md)（空表已备，后续轮填入）。
