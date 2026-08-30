@@ -65,14 +65,26 @@ services:
   # issuer 内外分离：浏览器可见的 authorize/redirect 走 CASDOOR_ISSUER
   # （宿主位 8001）；网关自身发起的 discovery/token/JWKS 走内部基址
   # CASDOOR_INTERNAL_ISSUER（compose 网络服务名 casdoor:8000，IdP 流量不出网）。
-  # upstream 指向 host.docker.internal:38080（dsh 本体留在宿主私口）；
-  # 会话 SQLite 与 Ed25519 密钥对持久化在 casdoor-gateway-data 卷——容器
-  # 重建不换钥（JWKS kid 不变）。镜像 slim 无 curl/wget，healthcheck 用 node
-  # 内置 fetch（同 nocobase 先例）。
+  # upstream 指向 host.docker.internal:38080（dsh 本体留在宿主私口）。
+  # 数据面 bind mount：${HOME}/.dsh-casdoor-gateway → /data——会话 SQLite 与
+  # Ed25519 身钥直接落宿主目录，容器重建不换钥（JWKS kid 不变），另有宿主
+  # 侧可整目录备份的优点；launch-token 通道：dsh-casdoor-auth 插件（宿主
+  # 进程）把 webserver launch token 以 0600 写入 ~/.dsh-casdoor-gateway/
+  # webserver-token.json，容器网关在 /data/webserver-token.json 读取完成
+  # UpstreamAuth cookie 交换——因此容器必须以宿主 uid:gid 运行（见 user）。
+  # user 覆盖：镜像默认 USER node（uid 1000），读不了宿主 0600 token 文件、
+  # 写不了宿主属主目录；501:20 为本机单机部署值（宿主 uid:gid），跨机器
+  # 部署按宿主调整。
+  # ⚠ down -v 警告：bind mount 形态下 docker compose down -v 会把 casdoor-data
+  # 等命名卷连同 casdoor 种子一起清——禁止 down -v。镜像 slim 无 curl/wget，
+  # healthcheck 用 node 内置 fetch（同 nocobase 先例）。
   casdoor-gateway:
     build: { context: ., dockerfile: services/casdoor-gateway/Dockerfile }
     container_name: dsh-casdoor-gateway
     restart: unless-stopped
+    # 宿主 uid:gid（本机单机部署值，跨机器按宿主调整）：镜像默认 USER node
+    # （uid 1000）读不了宿主 0600 launch token 文件、写不了宿主属主目录。
+    user: "501:20"
     depends_on: [casdoor]
     env_file: [./services/casdoor-gateway/.env]
     ports:
@@ -86,7 +98,13 @@ services:
       CASDOOR_INTERNAL_ISSUER: http://casdoor:8000
       GATEWAY_DATA_DIR: /data
     volumes:
-      - casdoor-gateway-data:/data
+      # bind mount（宿主 ~/.dsh-casdoor-gateway → /data）。launch-token 通道：
+      # dsh-casdoor-auth 插件（宿主进程）把 webserver launch token 以 0600 写入
+      # ~/.dsh-casdoor-gateway/webserver-token.json，容器网关在
+      # /data/webserver-token.json 读取完成 UpstreamAuth cookie 交换；会话
+      # SQLite 与 Ed25519 身钥也落宿主目录（持久化语义不变，另有宿主侧可
+      # 备份的优点）。
+      - ${HOME}/.dsh-casdoor-gateway:/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
@@ -273,7 +291,6 @@ services:
 
 volumes:
   casdoor-data:
-  casdoor-gateway-data:
   om-pg-data:
   om-kafka-data:
   om-ch-data:
