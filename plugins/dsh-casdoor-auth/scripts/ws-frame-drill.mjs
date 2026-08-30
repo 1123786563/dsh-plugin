@@ -126,11 +126,11 @@ async function rpc (client, method, payload) {
   const res = await client.call(`${GATEWAY}/api/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
+    body: JSON.stringify({ type: 'client-request', rpcId, method, payload: { args: payload } }),
   })
   const envelope = await res.json().catch(() => { throw new Error(`${method}: non-JSON HTTP ${String(res.status)}`) })
   if (envelope?.result?.ok !== true) {
-    throw new Error(`${method} failed: HTTP ${String(res.status)} ${JSON.stringify(envelope).slice(0, 200)}`)
+    throw new Error(`${method} failed: HTTP ${String(res.status)} ${JSON.stringify(envelope).slice(0, 600)}`)
   }
   return envelope.result.value
 }
@@ -139,7 +139,12 @@ async function rpc (client, method, payload) {
 function sessionReferences (value, found = new Set(), depth = 0) {
   if (depth > 6 || value === null || typeof value !== 'object') return found
   if (Array.isArray(value)) {
-    for (const item of value) sessionReferences(item, found, depth + 1)
+    for (const item of value) {
+      // api-session/* emits carry the session id as a POSITIONAL argument
+      // (args[0]); key-based extraction alone would false-negative them.
+      if (typeof item === 'string' && /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(item)) found.add(item)
+      else sessionReferences(item, found, depth + 1)
+    }
     return found
   }
   for (const [key, inner] of Object.entries(value)) {
@@ -264,14 +269,17 @@ async function main () {
   // authority) and must NEVER flow to the other tenant.
   const own = {}
   for (const name of ['alice', 'bob']) {
-    const created = await rpc(clients[name], 'session.create', { cwd: `/tmp/ws-frame-drill-${name}` })
-    if (typeof created?.sessionId !== 'string' || created.sessionId.length === 0) throw new Error(`session.create returned no sessionId for ${name}`)
+    const created = await rpc(clients[name], 'session/create', { request: { cwd: `/tmp/ws-frame-drill-${name}` } })
+    if (typeof created?.sessionId !== 'string' || created.sessionId.length === 0) throw new Error(`session/create returned no sessionId for ${name}`)
     own[name] = created.sessionId
-    await rpc(clients[name], 'session.prompt', {
-      sessionId: own[name], mode: 'queue', content: [{ type: 'text', text: `${PROMPT_TEXT} (${name})` }],
+    await rpc(clients[name], 'session/prompt', {
+      request: {
+        requestId: crypto.randomUUID(),
+        sessionId: own[name], mode: 'queue', content: [{ type: 'text', text: `${PROMPT_TEXT} (${name})` }],
+      },
     })
   }
-  record('alice/bob 各自 session.create + session.prompt 成功（经网关自动认领）', true, `alice=${own.alice.slice(0, 8)}… bob=${own.bob.slice(0, 8)}…`)
+  record('alice/bob 各自 session/create + session/prompt 成功（经网关自动认领）', true, `alice=${own.alice.slice(0, 8)}… bob=${own.bob.slice(0, 8)}…`)
 
   await new Promise(resolve => setTimeout(resolve, SETTLE_MS))
   for (const stream of Object.values(streams)) stream.close()
@@ -280,6 +288,7 @@ async function main () {
   for (const [name, stream] of Object.entries(streams)) {
     refs[name] = stream.referenced()
     console.log(`  ${name}: ${String(stream.frames.length)} 帧类型集合 [${[...stream.events].slice(0, 8).join(', ')}] 引用会话 ${String(refs[name].size)} 个`)
+    for (const id of refs[name]) console.log(`    ref: ${id}`)
   }
 
   const aliceLeak = refs.alice.has(own.bob)
