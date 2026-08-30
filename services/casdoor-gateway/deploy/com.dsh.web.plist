@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- com.dsh.web — 私口 38080 dsh web 的开机自启与崩溃自愈（KeepAlive）。
+     本机单机部署形态：ProgramArguments / WorkingDirectory / 日志路径均为本机
+     绝对路径，跨机器部署需按宿主调整。WorkingDirectory 是 deepseek-harness 的
+     dsh-request-guard patch worktree（live 运行时，分支 tip 见
+     scripts/host-patches/README.md 状态表）——勿清理该 worktree。
+     安装/卸载命令见 services/casdoor-gateway/README.md「常驻与自愈（launchd）」；
+     逃生门卸载命令见同 README「逃生门与回滚」节。 -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.dsh.web</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/pnpm</string>
+		<string>dsh</string>
+		<string>web</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/wuyongjun/trea/deepseek-harness/.worktrees/dsh-request-guard</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/wuyongjun/.dsh-doctor/logs/dsh-web.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/wuyongjun/.dsh-doctor/logs/dsh-web.launchd.log</string>
+</dict>
+</plist>
