@@ -21,6 +21,7 @@
   },
   "scripts": {
     "build": "tsc -b && tsdown && node scripts/build-client.mjs",
+    "pretest": "pnpm run build",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false"
   },

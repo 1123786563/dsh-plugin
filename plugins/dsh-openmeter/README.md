@@ -20,7 +20,7 @@ OpenMeter 计费插件 for DeepSeek Harness：把每次 LLM 模型调用的 toke
 
 ## 运营者 API 迁移
 
-原全局收银台路由已迁移到运营者前缀 `/api/openmeter/operator/*`,由运营者角色守卫:接线 auth seam 时必须解析出 `isOperator` 策略,stock 部署保持原回环守卫行为。`/status` 与 `/usage` 原地不动;方法、body 契约、成功 payload 形状与迁移前一致。
+原全局收银台路由已迁移到运营者前缀 `/api/openmeter/operator/*`,由运营者角色守卫:接线 auth seam 时必须解析出 `isOperator` 策略,stock 部署保持原回环守卫行为。`GET /api/openmeter/status` 与 `GET /api/openmeter/usage` 原地不动;方法、body 契约、成功 payload 形状与迁移前一致。
 
 | 旧路径(已移除) | 新路径 |
 | --- | --- |
@@ -56,6 +56,31 @@ OpenMeter 计费插件 for DeepSeek Harness：把每次 LLM 模型调用的 toke
 - `actor`:仅当 auth seam 在线且解析出策略时存在;stock 回环模式(无 seam)省略该字段,绝不伪造身份。
 
 GET 读响应不变(无 audit,列表 payload 字节兼容)。重复操作语义:block 同值两次均 200(幂等 set,第二次 `audit.at` 不早于第一次)、binding 同对两次均 200、grant 两次均 201(充值有意非幂等)。
+
+### 回滚
+
+迁移不留兼容别名:旧路径在本版本固定 410,不存在「关掉 410 恢复旧路径」的开关。回滚 = 重新部署仍注册旧全局路径的上一版插件构建(连同其 `cordis.patch.yml` 与 `lib/` 产物),客户端即恢复旧路径;已改到运营者前缀的调用方需随回滚一并改回。数据面无迁移:operator store、预算与账本的磁盘格式未变,回滚不涉及任何数据操作。
+
+## 租户自助 API(/me/*)
+
+任意已映射租户的成员(无角色要求)只读本人租户数据;预算写需租户管理者角色。subject 只来自已验签身份解析出的策略——query/body 参数一律不参与归属。未接身份服务(或其身份源请求时缺席)时 `/me/*` 无 stock 回环兼容路径:一律 401 `unauthenticated`,绝不无范围地服务租户数据。
+
+| 路径 | 方法 | 契约要点 |
+| --- | --- | --- |
+| `/api/openmeter/me/summary` | GET | 本人租户额度摘要。OpenMeter 拒绝时仍 200,以 `availability: "unavailable"` 降级态返回并保留本地 7 天聚合,不带余额、访问标志或错误文本;租户未映射 403 `tenant-unmapped`。 |
+| `/api/openmeter/me/usage` | GET | 本人租户持久账本明细(分页)。query:`from`/`to`(整数 epoch 毫秒)、`limit`(1..100,默认 50)、`model`(去空格后非空)、`cursor`(非空);`subject`/`tenantId` 参数一律 400 `subject-not-allowed`;账本 seam 缺席或故障 503 `ledger-unavailable`。行内剥除内部身份(source/eventId/subject)。 |
+| `/api/openmeter/me/budget` | GET/PUT | 月度预算预测(响应含 `canManageBudget`)。PUT 需租户管理者角色(默认 `owner`),不足 403 `forbidden`;body 只允许 `{"monthlyBudgetCny": <number>}`,其他键或缺键 400 `invalid-body`,非正数/超过 1e8 400 `invalid-amount`;预算或账本 seam 缺席/读失败 503 `budget-unavailable`(写已保存仍如实答 503)。 |
+
+## 角色与可用面矩阵
+
+| 可用面 | 租户成员(已映射,无管理角色) | 运营者(isOperator) | stock 回环(未接身份服务) |
+| --- | --- | --- | --- |
+| `/me/summary`、`/me/usage` | ✅ 仅本人租户数据 | ✅ 读自身映射租户(运营者角色不豁免映射要求) | ❌ 401 `unauthenticated` |
+| `/me/budget` GET | ✅ | ✅ 同上 | ❌ 401 `unauthenticated` |
+| `/me/budget` PUT | ❌ 403 `forbidden`(管理者角色可写) | ✅ 自身映射租户 | ❌ 401 `unauthenticated` |
+| `/operator/*`(customers/grants/block/bindings) | ❌ 403 `forbidden` | ✅ 全量(变更带 audit actor) | ✅ 回环守卫放行(audit 无 actor) |
+| `GET /api/openmeter/status`、`GET /api/openmeter/usage` | ❌(403,无身份 401) | ✅ | ✅ |
+| 旧收银台路径(`/api/openmeter/customers` 等) | 410 `route-migrated`(一切方法、一切调用者) | 同左 | 同左 |
 
 ## 部署
 
@@ -137,7 +162,11 @@ node scripts/smoke.mjs [endpoint]
 ## 开发
 
 ```sh
-pnpm test && pnpm typecheck && pnpm build
+pnpm --dir plugins/dsh-openmeter test        # pretest 自动先 build,干净树可跑
+pnpm --dir plugins/dsh-openmeter typecheck
+pnpm --dir plugins/dsh-openmeter build
 ```
+
+(在插件目录内则 `pnpm test && pnpm typecheck && pnpm build` 等价;`lint` 脚本不存在。)
 
 宿主半区 `src/`（pipeline / wal / ledger / forwarder / gate / estimator / store / routes / openmeter client），浏览器半区 `src/client/`（设置一级「计费」页面：用量/收银台/设置卡片），契约见各文件头注释。
