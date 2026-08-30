@@ -17,7 +17,14 @@
 
 | 日期 | 档位 | 关键命令输出摘要 | 结论 |
 | --- | --- | --- | --- |
+| 2026-08-31 | 切换后验证（T2 收口后 00:28–00:50 复测） | finisher 00:00:40 直连矩阵 401/401/401（守卫在位窗口）；00:04:22 起 38080 被 zcode-cli 拉起的 rc.2 主检出直连 web（无守卫代码）占用→矩阵变 200/404/404、API 经 3080 403（网关日志「upstream answers without browser auth (dsh < 0.1.2-alpha)」）；登录全链路✅（dsh-admin→dsh_sid→免登）；WS 带 cookie 连接被撕（rc.2 上游） | 登录/会话链达标；38080 全 401 与 API/WS 面环境性阻断（守卫形态待用户侧解决唤醒链路冲突），守卫行为证据=finisher 矩阵+zero-trust-drill（#18） |
+| 2026-08-31 | tier-1 容器自愈 | down（无 -v）→三容器移除、3080 拒连、38080 宿主 web 不受影响（200）；up 定向三服务→healthz 12s 回绿；同 cookie 存活（GET /=200、/login 复访 302→/）；宿主/容器 identity pub md5=f50f661e6cf85aefc686f3ffb42f7bd7 一致 | ①②③ PASS；④ 38080 全 401 环境性阻断（同上）；**附带发现**：冷起后匿名 /login 500 粘滞（casdoor HTTP ~40s 才就绪、网关 discovery 拒连进程内粘滞），`docker restart dsh-casdoor-gateway` 3s 恢复→缺陷登记 #53 |
+| 2026-08-31 | fail-closed（折叠裁定 R25） | 独有断言「网关停用期间 38080 全 401」=守卫属性，守卫不在位无法 live 验证；「38080 独立于网关」已由 tier-1 停相证（网关死而 38080=200）；「起回后会话不掉」已由网关重启后同 cookie 免登证 | 折叠登记：live 不可验证部分以 zero-trust-drill（#18 隔离实证）+ finisher 00:00:40 矩阵为证据；守卫恢复在位后可补跑 |
 |  |  |  |  |
 |  |  |  |  |
 |  |  |  |  |
 |  |  |  |  |
+
+### 2026-08-31 环境冲突记录（等待用户决策）
+
+zcode-cli 唤醒链路会自动拉起 rc.2（0.1.1-rc.2）主检出直连 web 占 38080，挤掉 launchd 守卫形态（com.dsh.web EADDRINUSE crash-loop，KeepAlive 保留——直连 web 一旦消失自动夺回）；解法选项 (a) 唤醒链路改走 3080（b) 停止自动拉 web 复用在位 web (c) 守卫 patch 上流合并 (d) 接受窗口式守卫每轮收口。详见 wake-log 2026-08-31 各轮。
