@@ -126,6 +126,20 @@ CASDOOR_CLIENT_SECRET=change-me-64-hex \
 
 > init_data 的字段以 casdoor 实际版本为准做过一次校对；若某版本行为不符，在 casdoor UI 中核对应用配置即可（种子只影响首启）。
 
+## 存量会话迁移（issue #26）
+
+> **前置（fresh clone 必读）**：gateway 测试与迁移工具依赖 multi-tenant 嵌套 workspace 的安装态——root `pnpm-workspace` 的 `plugins/*` glob 不覆盖自带 lockfile 的嵌套 workspace，先跑 `pnpm --dir plugins/dsh-multi-tenant install --frozen-lockfile`。
+
+门禁启用前创建的无主存量会话，用 `scripts/migrate-legacy-sessions.mjs` 批量 claim 给 `dsh-ops/dsh-admin`（ADR-0005 Q12=a）：普通租户列表不可见、管理员可见可接管。幂等可重跑，`--dry-run` 零副作用（不写归属库、不写任何状态文件），claim-once 语义与 multi-tenant `SQLiteTenantSessionStore.claim()` 逐字一致（单测用真实 store 守护）。
+
+```bash
+pnpm --dir services/casdoor-gateway build        # 脚本 import lib/ 编译产物
+MIGRATION_PASSWORD='dsh-Admin1' node scripts/migrate-legacy-sessions.mjs --dry-run \
+  --db <宿主cwd>/.dsh-multi-tenant/session-ownership.sqlite --gateway http://127.0.0.1:3080
+```
+
+登录走网关 cookie 序列（e2e.mjs 同款），`--tenant`/`--user`（默认 `dsh-ops`/`dsh-admin`）同时是 claim 目标与登录身份；密码只经 `--password` 或 env `MIGRATION_PASSWORD` 传入。退出码：`0` 成功（含无可迁移）、`1` 参数错误、`2` 运行错误；stdout 先输出一行完整 JSON 报告，再输出人类可读摘要（计数 + 迁移清单前 10 条 + target principal + db 路径）。本地演练全步骤（起栈→造夹具→dry-run→真跑→可见性/幂等断言→清理留档）见 [scripts/MIGRATION-RUNBOOK.md](./scripts/MIGRATION-RUNBOOK.md)。
+
 ## 内存注意（ADR-0003）
 
 fastify 的请求体处理是**先完整缓冲**再进 handler——网关每个并发请求最多驻留一份请求体副本，`bodyLimit` 因此设为 320 MiB（覆盖 dsh 的 300 MiB 附件信封）。高并发大附件场景请评估内存预算，或等待 v2 的 raw-server 流式转发演进。
