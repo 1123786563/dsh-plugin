@@ -37,6 +37,7 @@ import {
 } from 'dsh-multi-tenant'
 import { Config, mcpServersFor, resolveConfig } from './config.ts'
 import type { Config as ConfigShape } from './config.ts'
+import { applyControlFrameFilter, applyRemoteEventFrameFilter } from './frame-filter.ts'
 import { applyGuard } from './guard.ts'
 import { IdentityVerifier, type CasdoorIdentity } from './identity.ts'
 import { applySessionFilter } from './session-filter.ts'
@@ -114,6 +115,14 @@ export type {
   SessionFilterSeat,
   SessionListFilterLike,
 } from './session-filter.ts'
+export { applyControlFrameFilter, applyRemoteEventFrameFilter, createFrameFilterFactory } from './frame-filter.ts'
+export type {
+  ControlFrameFilterSeat,
+  FrameFilterDeps,
+  FrameFilterFactoryLike,
+  FrameFilterLike,
+  RemoteEventFrameFilterSeat,
+} from './frame-filter.ts'
 export { IdentityVerifier }
 export type { CasdoorIdentity }
 export { inject401Watcher, WATCHER_SCRIPT }
@@ -178,6 +187,46 @@ export function apply(ctx: Context, config: Partial<ConfigShape> | undefined): v
       entry.adminRoles,
     )
     scoped.effect(() => release, 'casdoor-auth: session visibility filter')
+  })
+
+  // Mux frame filtering (ADR-0005, issue #25): with the guard active, claim
+  // BOTH host frame-filter seats — the typertGateway $events stream
+  // (/api/remote.mux waterfalls and session-referenced emits) and the
+  // sessionController control stream (baseline session list, jobs/queue
+  // broadcasts). Every judgment reuses the multi-tenant ownership kernel's
+  // synchronous reads: an open-time own-session snapshot per connection plus
+  // an authoritative per-frame query for sessions claimed later. Admins are
+  // exempt; principal-less carriers are denied fail-closed. guardEnabled=false
+  // keeps zero seat interaction — without the guard no principal materializes,
+  // and a registered filter would drop every frame.
+  ctx.inject(['typertGateway', 'sessionController', 'multiTenant'], scoped => {
+    if (!entry.guardEnabled) return
+    const multiTenant = scoped.multiTenant
+    if (typeof multiTenant.canAccessSessionSync !== 'function'
+      || typeof multiTenant.listSessionsByOwnerSync !== 'function') {
+      throw new Error(
+        'casdoor-auth frame filtering is enabled but the active multi-tenant runtime provides no synchronous ownership reads; '
+          + 'update the vendored dsh-multi-tenant package to the current version',
+      )
+    }
+    const frameDeps = {
+      listSessionsByOwnerSync: (principal: { tenantId: string, userId: string }) =>
+        multiTenant.listSessionsByOwnerSync(principal),
+      canAccessSessionSync: (principal: { tenantId: string, userId: string }, sessionId: string) =>
+        multiTenant.canAccessSessionSync(principal, sessionId),
+    }
+    const releaseRemote = applyRemoteEventFrameFilter(
+      (scoped as unknown as { typertGateway?: unknown }).typertGateway,
+      frameDeps,
+      entry.adminRoles,
+    )
+    scoped.effect(() => releaseRemote, 'casdoor-auth: remote-event frame filter')
+    const releaseControl = applyControlFrameFilter(
+      (scoped as unknown as { sessionController?: unknown }).sessionController,
+      frameDeps,
+      entry.adminRoles,
+    )
+    scoped.effect(() => releaseControl, 'casdoor-auth: control frame filter')
   })
 
   // dsh >= 0.1.2-alpha browser auth: the webserver authenticates every

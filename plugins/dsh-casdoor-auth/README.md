@@ -60,6 +60,8 @@ pnpm dsh web        # webserver 已被 bundle patch 挪到 127.0.0.1:38080
 
 `guardEnabled` 开启时，插件同时认领宿主 sessionController 的唯一 sessionFilter 座位并装上**会话可见性过滤**（ADR-0005）：会话列表/搜索只保留当前请求主体自己认领的会话，一切带 sessionId 的方法（history/prompt/fork/export/cancel 等）先过归属准入，未知/无主/跨租户/同租户跨用户一律 403 fail-closed，`adminRoles` 命中者全量豁免——前端零改动。宿主核心若只有守卫座而无 sessionFilter 座（旧版 patch），过滤静默不生效：请重新应用当前版 `scripts/host-patches/deepseek-harness.dsh-request-guard.patch`。
 
+`guardEnabled` 开启时，插件还认领宿主**两个帧过滤座位**并装上**mux 帧过滤**（ADR-0005 事件流面，issue #25）：typertGateway 的 `$events` 流座位（`/api/remote.mux` 上的 waterfall 与带会话引用的 emit 帧）与 sessionController 的控制流座位（baseline 会话清单 + jobs/queue 广播帧）。判定为同步：每条连接建立时物化自己的会话集合（快照命中 O(1)），未命中的会话逐帧做一次权威归属查询——连接建立后的新认领（MCP claim、跨进程迁移写入）立即可见；`adminRoles` 命中者收全量；无 guard principal 的载体（如仅 launch-token 的连接）fail-closed 全拒。判定依赖抛错时由宿主契约丢弃该帧并告警（不静默放行）。宿主核心缺任一帧过滤座位或 vendored `dsh-multi-tenant` 缺同步归属读取面时，插件启动大声报错（fail-loud）。三视角验收脚本见 [`scripts/ws-frame-drill.mjs`](./scripts/ws-frame-drill.mjs)。
+
 端口约定：网关公口 `3080`、dsh 私口 `38080`（`DSH_CASDOOR_DSH_PORT` 可改，值经 `Number()` 强转：空串视同未设回落 `38080`，非数值得 `NaN` 由 webserver schema 大声拒绝；改口需同步网关 `DSH_UPSTREAM_URL` 与插件 `DSH_CASDOOR_GATEWAY_JWKS_URL`）、casdoor `8001`；演练（rehearsal drill）另起隔离私口 `38081` 的第二实例，不占用正式 `38080`（全流程见[演练手册](#演练手册zero-trust-私口守卫-rehearsal-drill)）。
 
 ## 演练手册（zero-trust 私口守卫 rehearsal drill）

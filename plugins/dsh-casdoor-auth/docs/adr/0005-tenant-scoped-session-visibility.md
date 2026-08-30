@@ -10,7 +10,7 @@
 - 列表：`session.list`/`session.search` 响应按请求主体过滤。
 - 准入：带 sessionId 的方法（history/prompt/fork/export/cancel 等）逐个 `assertSessionAccess`；未知/无主会话 fail-closed。
 - 新会话归属：宿主会话钩子提供"会话创建"回调，stock UI `session.create`/`fork` 产生的会话自动 claim 给当前请求主体（否则隔离后用户自己新建的会话自己不可见）。
-- 事件流：mux 帧过滤（ADR-0004 第 3 钩子）。
+- 事件流：mux 帧过滤（ADR-0004 第 3 钩子）。**已实现（issue #25）**：插件认领宿主两个帧过滤座位——typertGateway `$events` 流（`registerRemoteEventFrameFilter`）与 sessionController 控制流（`registerControlFrameFilter`，含 baseline 会话清单）；判定同步复用 vendored multi-tenant 的同步归属读取面（`canAccessSessionSync`/`listSessionsByOwnerSync`，纯新增可选能力）：每连接建立时物化 own-set 快照 + 未命中逐帧权威查询（连接后新认领立即可见）；admin 豁免收全量、无 principal 载体 fail-closed、判定抛错由宿主丢帧告警。
 - 特权豁免：请求主体 roles 含 `dsh-admin` 豁免全部过滤（运维排障视角，Q11=a）。
 - 存量会话：一次性迁移脚本把既有无主会话全部 claim 给 `dsh-ops/dsh-admin`（Q12=a）。
 
