@@ -7,6 +7,7 @@
 网关是根 compose 的 `casdoor-gateway` 服务（见根 `docker-compose.yml`）：
 
 ```bash
+mkdir -p ~/.dsh-casdoor-gateway             # bind 目录存在性：数据面（会话库/身钥/launch token）落这里
 cp .env.example .env                        # 填 CASDOOR_CLIENT_SECRET（与 init_data.json 一致；gitignored）
 docker compose up -d casdoor-gateway        # 仓库根；自动带起 casdoor + postgres
 ```
@@ -20,22 +21,150 @@ docker compose up -d casdoor-gateway        # 仓库根；自动带起 casdoor +
   ```
 
 - **upstream**：容器经 `DSH_UPSTREAM_URL=http://host.docker.internal:38080` 回连宿主私口上的 dsh webserver（dsh 本体不容器化）。`host.docker.internal` 由 Docker Desktop 自带；Linux 原生 Docker 需为本服务补 `extra_hosts: ["host.docker.internal:host-gateway"]`（compose 默认不带，Linux 部署时自行追加）。
-- **持久化**：会话 SQLite 与 Ed25519 签名密钥对存 `casdoor-gateway-data` 卷（容器内 `/data`）——容器重建/重启不换钥，`/.well-known/jwks.json` 的 `kid` 前后一致，登录会话不丢。
+- **持久化（bind mount）**：`~/.dsh-casdoor-gateway` → 容器内 `/data`（compose 里 `${HOME}/.dsh-casdoor-gateway:/data`）——会话 SQLite 与 Ed25519 签名密钥对直接落宿主目录，容器重建/重启不换钥，`/.well-known/jwks.json` 的 `kid` 前后一致，登录会话不丢，且宿主侧可整目录备份。launch-token 通道也在该目录：dsh-casdoor-auth 插件（宿主进程）把 webserver launch token 以 0600 写入 `~/.dsh-casdoor-gateway/webserver-token.json`，容器网关在 `/data/webserver-token.json` 读取完成 UpstreamAuth cookie 交换。
+- **容器身份（user 覆盖）**：服务设 `user: "501:20"`（宿主 uid:gid）——镜像默认 `USER node`（uid 1000）读不了宿主 0600 token 文件、也写不了宿主属主目录；501:20 为本机单机部署值，跨机器部署按宿主调整。
 - **issuer 内外分离**：浏览器可见的 authorize/redirect/logout 与 ID-token `iss` 校验一律走外部 `CASDOOR_ISSUER`（宿主位 `http://127.0.0.1:8001`）；网关自身发起的 discovery/token 兑换/JWKS 拉取走 `CASDOOR_INTERNAL_ISSUER=http://casdoor:8000`（compose 网络服务名，IdP 流量不出网）。casdoor 的 discovery 文档由 `docker/app.ini` 的 `origin` 钉死在外部形式，网关在使用点把 `token_endpoint`/`jwks_uri` 的 origin 替换为内部基址。**尾斜杠坑**：所有 issuer 比较先过 `new URL(x).href` 归一化（casdoor 的 `iss` 无尾斜杠、`URL.href` 有）——两侧配置错值会被启动时 fail-loud 的 iss 断言拦下。内部发现基址的启动日志证据：
 
   ```bash
   docker logs dsh-casdoor-gateway 2>&1 | grep -o 'discovery via [^)]*'
   ```
 
-停止（数据卷保留，绝不 `down -v` 除非明确要清种子）：
+停止：
 
 ```bash
 docker compose stop casdoor-gateway
 ```
 
+> ⚠ **`docker compose down -v` 属破坏性操作**：清 casdoor 种子 + openmeter/nocobase 共享 PG 数据（网关身钥因 bind mount 幸存），仅在明确接受数据丢失时执行；日常停/起**绝不带 `-v`**——门禁栈停/起一律用不带 `-v` 的 `down` / `up -d`（见下方演练 ladder）。
+
+## 常驻与自愈（launchd）
+
+正式形态的常驻与重启自愈由两个 LaunchAgent 模板承担（`deploy/` 目录；**本机单机部署形态**，plist 内为本机绝对路径，跨机器部署需按宿主调整）：
+
+| plist | 职责 | 关键语义 |
+| --- | --- | --- |
+| [`deploy/com.dsh.web.plist`](./deploy/com.dsh.web.plist) | 私口 38080 dsh web 的开机自启 + 崩溃自愈 | `RunAtLoad` + `KeepAlive`（进程挂掉 launchd 立即拉起）+ `ProcessType: Background`；WorkingDirectory = dsh-request-guard patch worktree（live 运行时，勿清理） |
+| [`deploy/com.dsh.gate-stack.plist`](./deploy/com.dsh.gate-stack.plist) | 登录期保障容器门禁栈在位 | **一次性**（`RunAtLoad`，无 KeepAlive）：拉起 OrbStack → 循环等 `docker info` 可用（最多 120s，每 5s 一次）→ `docker compose up -d casdoor postgres casdoor-gateway` 幂等兜底；OrbStack 自启不可依赖时的兜底 |
+
+安装（先建日志目录——plist 的 StandardOut/ErrorPath 指向 `~/.dsh-doctor/logs/` 下各自的 `*.launchd.log`；**安装顺序：`com.dsh.gate-stack` 最后安装**——bootstrap 即触发 `RunAtLoad` 立即执行（会尝试以默认 3080 起 compose），切换窗口内先装 `com.dsh.web`）：
+
+```bash
+mkdir -p ~/.dsh-doctor/logs
+launchctl bootstrap gui/$(id -u) services/casdoor-gateway/deploy/com.dsh.web.plist        # 先装：只自愈 dsh web，不触发容器
+launchctl bootstrap gui/$(id -u) services/casdoor-gateway/deploy/com.dsh.gate-stack.plist # 最后装：bootstrap 即 RunAtLoad 立即起门禁栈（默认 3080）
+```
+
+卸载：
+
+```bash
+launchctl bootout gui/$(id -u)/com.dsh.web
+launchctl bootout gui/$(id -u)/com.dsh.gate-stack
+```
+
+自愈链一句话：整机重启 → 用户登录（launchd 加载两个 agent）→ OrbStack（自启；不可依赖时 gate-stack 兜底 `open -ga OrbStack` + 等待循环）→ `restart: unless-stopped` 容器自愈（casdoor / postgres / casdoor-gateway）→ com.dsh.web（RunAtLoad + KeepAlive）私口 38080 就位 → 3080 网关自动可用。
+
+## 排障手册（3080 不通检查顺序：容器→cookie→casdoor→私口）
+
+按序排查，每步给命令与期望；未命中期望再进下一步。
+
+**1. 容器**——三容器应 Up、网关健康检查应 200：
+
+```bash
+docker ps    # dsh-casdoor-gateway / dsh-casdoor / dsh-postgres-1 应 Up
+curl -s http://127.0.0.1:3080/healthz    # 期望 200
+```
+
+**2. cookie**——未登录应 302 到 casdoor authorize；浏览器侧异常先清 cookie 重登：
+
+```bash
+curl -sI http://127.0.0.1:3080/login    # 期望 302 且 Location 以 http://127.0.0.1:8001/login/oauth/authorize 开头
+```
+
+**3. casdoor**——IdP 进程与 HTTP 面应活着：
+
+```bash
+docker logs --tail 50 dsh-casdoor
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8001/    # 有响应即可（任意 HTTP 码）
+```
+
+**4. 私口**——dsh web 与守卫应在位，期望 **401**（守卫在位即此码，401 是健康态不是故障）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:38080/    # 期望 401
+```
+
+connection refused → dsh web 未起，查 launchd 与日志：
+
+```bash
+launchctl print gui/$(id -u)/com.dsh.web
+tail ~/.dsh-doctor/logs/dsh-web.launchd.log
+```
+
+## 重启自愈演练 ladder（Issue #21）
+
+四档由轻到重逐级验证；每档含命令、验收断言与证据要求，执行后把证据登记进 [docs/restart-heal-drills.md](./docs/restart-heal-drills.md)（空表已备，后续轮填入）。
+
+**tier-1 容器自愈**——compose 栈整体停起（**绝不带 `-v`**；down 保持整项目，up 定向门禁栈——本机仅门禁栈常驻，多栈环境 down 会连带停 openmeter/nocobase，定向 up 避免把它们拉起）：
+
+```bash
+docker compose down && docker compose up -d casdoor postgres casdoor-gateway
+```
+
+验收断言：① 容器自愈（`docker ps` 三容器 Up）；② 3080 登录链路通（`curl -sI http://127.0.0.1:3080/login` 302 → casdoor authorize）；③ **同一浏览器 cookie 会话存活**（bind mount 同一会话库，不重登直接可用）；④ 38080 全 401。证据：各命令输出摘要 + 免登验证记录。
+
+**fail-closed 网关停用**——私口守卫独立于网关在位：
+
+```bash
+docker compose stop casdoor-gateway
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:38080/    # 期望仍全 401
+docker compose start casdoor-gateway
+```
+
+验收断言：① 停用期间 38080 仍全 401；② `start` 后自动回绿（3080 链路恢复）且登录会话不掉（同 cookie 免登）。证据：两时点输出对比。
+
+**tier-2 OrbStack 重启**（等效 Issue 原文"Docker Desktop 重启"档）：
+
+```bash
+osascript -e 'quit app "OrbStack"'
+open -a OrbStack
+# 等 docker info 恢复后再验：
+until docker info >/dev/null 2>&1; do sleep 5; done
+```
+
+验收断言：同 tier-1 全套（`restart: unless-stopped` 容器自愈 + 3080 链路 + 同 cookie 会话 + 38080 全 401）。证据：同 tier-1。
+
+**tier-3 整机重启**——系统重启并登录后验同 tier-1 全套，另加 launchd 自愈证据：
+
+```bash
+launchctl print gui/$(id -u)/com.dsh.web            # state = running
+launchctl print gui/$(id -u)/com.dsh.gate-stack     # 一次性 agent，显示已运行/最后一次退出状态
+tail -n 50 ~/.dsh-doctor/logs/dsh-web.launchd.log
+```
+
+## 逃生门与回滚
+
+两级逃生门，从轻到重；操作后 3080/38080 行为变化应立即复核。
+
+**一级：守卫关（保留网关与部署形态）**——`cordis.patch.yml` profile 的 casdoor-auth 覆盖 `guardEnabled: false`，重启 dsh web 生效：
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.dsh.web
+```
+
+**二级：回门禁前形态（dsh web 回 3080 直连）**——profile 移除 casdoor-auth bundle 后按序执行（顺序即防坑：① 先释放 3080，否则旧 web 起 3080 会 EADDRINUSE；③ 在 harness 目录执行，compose 命令必须留在仓库根）：
+
+```bash
+# 仓库根
+docker compose stop casdoor-gateway                 # ① 停网关容器，先释放 3080
+launchctl bootout gui/$(id -u)/com.dsh.web          # ② 卸载 launchd 常驻（释放 38080 私口）
+cd /Users/wuyongjun/trea/deepseek-harness && pnpm dsh web    # ③ 手动起旧形态 dsh web（回 3080 直连）
+```
+
+③ 是前台长驻进程：另开终端 `curl -sI http://127.0.0.1:3080` 复核已回到直连形态。
+
 ## 开发模式（pnpm dev）
 
-不经容器直跑源码——改代码快速重启的场景；对外部署一律用上面的 compose 形态。
+不经容器/launchd 直跑源码——仅本机调试、改代码快速重启的场景；对外一律用上面的 compose 正式形态（常驻与自愈由上方 launchd 节承担）。
 
 ```bash
 # 1. casdoor（官方镜像；固定版本用 CASDOOR_IMAGE=casbin/casdoor:vX.Y.Z）
@@ -99,7 +228,7 @@ SaaS 场景给每个租户分发带 `org` 参数的入口 URL（或由你的租�
 
 ## casdoor 初始化（docker/init_data.json）
 
-首启空库时种子：组织 `acme`、`globex`、`dsh-ops`（平台管理员）；用户 `acme/alice`、`globex/bob`、`dsh-ops/dsh-admin`；应用 `dsh-gateway`（owner=admin、`isShared` 跨组织共享——这是"单应用多组织"的关键，redirect URI `http://127.0.0.1:3080/casdoor/callback` 与 `http://127.0.0.1:3099/casdoor/callback`，JWT/RS256）。重新种子需 `docker compose down -v`。改 `clientSecret` 时同步 `init_data.json` 与网关 env。多组织登录用 `组织/用户名` 形式。
+首启空库时种子：组织 `acme`、`globex`、`dsh-ops`（平台管理员）；用户 `acme/alice`、`globex/bob`、`dsh-ops/dsh-admin`；应用 `dsh-gateway`（owner=admin、`isShared` 跨组织共享——这是"单应用多组织"的关键，redirect URI `http://127.0.0.1:3080/casdoor/callback` 与 `http://127.0.0.1:3099/casdoor/callback`，JWT/RS256）。重新种子属破坏性操作：`docker compose down -v` 清 casdoor 种子 + openmeter/nocobase 共享 PG 数据（网关身钥因 bind mount 幸存），仅在明确接受数据丢失时执行；日常停/起绝不带 `-v`（见上方部署节警告）。改 `clientSecret` 时同步 `init_data.json` 与网关 env。多组织登录用 `组织/用户名` 形式。
 
 > **角色挂法（casdoor 姿势）**：用户角色必须挂在 **role 侧的 `users` 数组**（`"users": ["dsh-ops/dsh-admin"]`）才会进 JWT——写在用户 JSON 的 `roles` 字段里不会生效（运行时不读）。另外两个实测要点：共享应用的 ID token `aud` 是 `<clientId>-org-<组织>`（网关已按此校验）；`iss` 无尾斜杠（网关已归一化）。
 
