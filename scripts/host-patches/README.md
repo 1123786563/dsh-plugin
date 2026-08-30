@@ -13,6 +13,8 @@
 | 变更规模 | 33 文件，+2602/−97（`packages/api/gateway` 载体重入 + 事件帧过滤、`packages/api/session-controller` 准入原语 + 控制帧过滤与会话引用表、`packages/api/remotes` 引用表装配、`packages/host/webserver` 守卫与载体传播，含实证测试） |
 | 导出命令 | `git -C /Users/wuyongjun/trea/deepseek-harness diff cd5ef8148158c3a752a658978873241fdf8e2bbc..9cf768e3021030af274754e39bcca1d0f05d0fce` |
 
+> **live 运行时注记**：`dsh-request-guard` 分支的 worktree（`/Users/wuyongjun/trea/deepseek-harness/.worktrees/dsh-request-guard`，分支 tip 见上表）是 **live 运行时**——LaunchAgent `com.dsh.web` 的 WorkingDirectory（见 `services/casdoor-gateway/deploy/com.dsh.web.plist`）。勿对该 worktree 执行 `git worktree prune` 或清理/删除；确需重建时，先重放本目录 patch 恢复分支内容，再核对 plist 指向。
+
 patch 文件保持**纯净 git diff 输出**（首行即 `diff --git`，无任何前置注释——统一 diff 中 `#` 行不是合法头，会导致 `git apply` 拒绝）；溯源元数据放在本表与 `apply.sh` 的常量里。
 
 ## 重放（apply.sh）
