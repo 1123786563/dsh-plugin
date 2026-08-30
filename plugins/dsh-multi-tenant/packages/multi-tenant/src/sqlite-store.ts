@@ -159,6 +159,16 @@ export class SQLiteTenantSessionStore extends TenantSessionStore {
   override async listByOwner(tenantId: string, userId: string): Promise<string[]> {
     return this.selectOwnerSessionIds.all(tenantId, userId).map(row => readSessionId(row))
   }
+
+  /** Synchronous face over the same prepared statements; sees committed writes from any connection. */
+  override getSync(sessionId: string): SessionOwner | undefined {
+    return readOwner(this.selectOwner.get(sessionId))
+  }
+
+  /** Synchronous face over the same prepared statements; sees committed writes from any connection. */
+  override listByOwnerSync(tenantId: string, userId: string): string[] {
+    return this.selectOwnerSessionIds.all(tenantId, userId).map(row => readSessionId(row))
+  }
 }
 
 export default SQLiteTenantSessionStore
