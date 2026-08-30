@@ -268,3 +268,57 @@ describe('TenantSessionStore service seam', () => {
     await expect(ctx.multiTenant.claimSession('s1', alice)).rejects.toThrow(MultiTenantError)
   })
 })
+
+describe('MultiTenantService synchronous ownership reads', () => {
+  let ctx: Context
+  let multiTenant: MultiTenantService
+
+  beforeEach(async () => {
+    ctx = new Context()
+    await ctx.plugin(InMemoryTenantSessionStore)
+    await ctx.plugin(MultiTenantService)
+    multiTenant = ctx.multiTenant
+  })
+
+  it('admits sync exactly when the async path admits', async () => {
+    await multiTenant.claimSession('s1', alice)
+    expect(multiTenant.canAccessSessionSync(alice, 's1')).toBe(true)
+    expect(multiTenant.canAccessSessionSync(bob, 's1')).toBe(false)
+    expect(multiTenant.canAccessSessionSync(eve, 's1')).toBe(false)
+    expect(multiTenant.canAccessSessionSync(alice, 'missing')).toBe(false)
+  })
+
+  it('lists the principal’s own sessions ascending', async () => {
+    await multiTenant.claimSession('s2', alice)
+    await multiTenant.claimSession('s1', alice)
+    expect(multiTenant.listSessionsByOwnerSync(alice)).toEqual(['s1', 's2'])
+  })
+
+  it('sees claims made after an earlier sync read (no caching)', async () => {
+    expect(multiTenant.canAccessSessionSync(alice, 'late')).toBe(false)
+    await multiTenant.claimSession('late', alice)
+    expect(multiTenant.canAccessSessionSync(alice, 'late')).toBe(true)
+  })
+
+  it('validates arguments identically to the async path', () => {
+    expect(() => multiTenant.canAccessSessionSync({ tenantId: 'acme', userId: '' }, 's1')).toThrow(ValidationError)
+    expect(() => multiTenant.canAccessSessionSync(alice, ' padded ')).toThrow(ValidationError)
+    expect(() => multiTenant.listSessionsByOwnerSync({ tenantId: '', userId: 'alice' })).toThrow(ValidationError)
+  })
+})
+
+describe('stores without the synchronous face', () => {
+  it('throw a guiding MultiTenantError from both sync methods', async () => {
+    class AsyncOnlyStore extends TenantSessionStore {
+      override claim: TenantSessionStore['claim'] = async () => 'created'
+      override get: TenantSessionStore['get'] = async () => undefined
+      override listByOwner: TenantSessionStore['listByOwner'] = async () => []
+    }
+    const ctx = new Context()
+    await ctx.plugin(AsyncOnlyStore)
+    await ctx.plugin(MultiTenantService)
+    expect(() => ctx.multiTenant.canAccessSessionSync(alice, 's1')).toThrow(MultiTenantError)
+    expect(() => ctx.multiTenant.listSessionsByOwnerSync(alice)).toThrow(MultiTenantError)
+    await ctx.fiber.dispose()
+  })
+})

@@ -41,6 +41,16 @@ export abstract class TenantSessionStore extends Service {
    * backends producing identical order for such ids.
    */
   abstract listByOwner(tenantId: string, userId: string): Promise<string[]>
+
+  /**
+   * Optional synchronous ownership reads for host hooks that must judge
+   * inside synchronous callbacks (e.g. per-frame stream filters). A backend
+   * declares the capability by implementing both members; consumers must
+   * feature-check before use. Reads see the backend's latest committed
+   * state — no caching is implied or required.
+   */
+  getSync?(sessionId: string): SessionOwner | undefined
+  listByOwnerSync?(tenantId: string, userId: string): string[]
 }
 
 /**
@@ -76,6 +86,19 @@ export class InMemoryTenantSessionStore extends TenantSessionStore {
   }
 
   override async listByOwner(tenantId: string, userId: string): Promise<string[]> {
+    const sessionIds: string[] = []
+    for (const [sessionId, owner] of this.owners) {
+      if (owner.tenantId === tenantId && owner.userId === userId) sessionIds.push(sessionId)
+    }
+    return sessionIds.sort()
+  }
+
+  override getSync(sessionId: string): SessionOwner | undefined {
+    const owner = this.owners.get(sessionId)
+    return owner ? { tenantId: owner.tenantId, userId: owner.userId } : undefined
+  }
+
+  override listByOwnerSync(tenantId: string, userId: string): string[] {
     const sessionIds: string[] = []
     for (const [sessionId, owner] of this.owners) {
       if (owner.tenantId === tenantId && owner.userId === userId) sessionIds.push(sessionId)

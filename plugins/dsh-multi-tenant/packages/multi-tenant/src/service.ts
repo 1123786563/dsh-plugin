@@ -73,17 +73,47 @@ export class MultiTenantService extends Service {
   protected async evaluateAccess(principal: TenantPrincipal, sessionId: string): Promise<AccessDecision> {
     validateSessionId(sessionId)
     validateTenantPrincipal(principal)
-    const owner = await this.store.get(sessionId)
-    if (!owner) return { allowed: false, reason: 'UNKNOWN_SESSION' }
-
-    // Cross-tenant access is unconditionally denied. Policy attributes outside
-    // this minimal ownership kernel cannot override this boundary.
-    if (owner.tenantId !== principal.tenantId) {
-      return { allowed: false, reason: 'TENANT_MISMATCH' }
-    }
-    if (owner.userId !== principal.userId) {
-      return { allowed: false, reason: 'USER_MISMATCH' }
-    }
-    return { allowed: true }
+    return ownerMatchDecision(await this.store.get(sessionId), principal)
   }
+
+  /** Synchronous fail-closed authorization for host hooks that cannot await. */
+  canAccessSessionSync(principal: TenantPrincipal, sessionId: string): boolean {
+    const store = this.requireSyncStore('canAccessSessionSync')
+    validateSessionId(sessionId)
+    validateTenantPrincipal(principal)
+    return ownerMatchDecision(store.getSync(sessionId), principal).allowed
+  }
+
+  /** Synchronous owner session list for host hooks that cannot await. */
+  listSessionsByOwnerSync(principal: TenantPrincipal): string[] {
+    const store = this.requireSyncStore('listSessionsByOwnerSync')
+    validateTenantPrincipal(principal)
+    return store.listByOwnerSync(principal.tenantId, principal.userId)
+  }
+
+  private requireSyncStore(caller: string): TenantSessionStore & Required<Pick<TenantSessionStore, 'getSync' | 'listByOwnerSync'>> {
+    const store = this.store
+    if (typeof store.getSync !== 'function' || typeof store.listByOwnerSync !== 'function') {
+      throw new MultiTenantError(
+        `${caller}: the active tenant session store provides no synchronous ownership reads`,
+      )
+    }
+    return store as TenantSessionStore & Required<Pick<TenantSessionStore, 'getSync' | 'listByOwnerSync'>>
+  }
+}
+
+/**
+ * Shared owner-match judgment behind both the async and sync read paths:
+ * cross-tenant access is unconditionally denied. Policy attributes outside
+ * this minimal ownership kernel cannot override this boundary.
+ */
+function ownerMatchDecision(owner: SessionOwner | undefined, principal: TenantPrincipal): AccessDecision {
+  if (!owner) return { allowed: false, reason: 'UNKNOWN_SESSION' }
+  if (owner.tenantId !== principal.tenantId) {
+    return { allowed: false, reason: 'TENANT_MISMATCH' }
+  }
+  if (owner.userId !== principal.userId) {
+    return { allowed: false, reason: 'USER_MISMATCH' }
+  }
+  return { allowed: true }
 }

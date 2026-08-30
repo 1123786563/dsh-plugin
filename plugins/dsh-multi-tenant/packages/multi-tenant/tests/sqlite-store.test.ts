@@ -77,4 +77,34 @@ describe('SQLiteTenantSessionStore', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  it('serves synchronous ownership reads against :memory:', async () => {
+    const ctx = new Context()
+    try {
+      await ctx.plugin(SQLiteTenantSessionStore, { path: ':memory:' })
+      const store = ctx.tenantSessionStore
+      const alice = { tenantId: 'acme', userId: 'alice' }
+      const eve = { tenantId: 'globex', userId: 'eve' }
+
+      await store.claim('s2', alice)
+      await store.claim('s1', alice)
+
+      expect(store.getSync?.('s1')).toEqual(alice)
+      expect(store.getSync?.('ghost')).toBeUndefined()
+      expect(store.listByOwnerSync?.('acme', 'alice')).toEqual(['s1', 's2'])
+      expect(store.listByOwnerSync?.('globex', 'eve')).toEqual([])
+
+      // Sync reads see later claims without any caching layer.
+      await store.claim('late', alice)
+      expect(store.getSync?.('late')).toEqual(alice)
+      expect(store.listByOwnerSync?.('acme', 'alice')).toEqual(['late', 's1', 's2'])
+
+      // Cross-tenant judgment material stays the service's concern; the store
+      // only returns ownership verbatim.
+      await store.claim('eves', eve)
+      expect(store.getSync?.('eves')).toEqual(eve)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })
