@@ -18,11 +18,13 @@ const POLL_MS = 30_000
 interface PanelPayload {
   ok: boolean
   error?: string
+  backend?: string
   baseUrl?: string
   workspace?: string
   projects?: { id: string, name: string, identifier: string }[]
   projectId?: string
   issues?: PanelIssue[]
+  states?: PanelState[]
   totalCount?: number
   nextCursor?: string
   issueError?: string
@@ -35,9 +37,20 @@ interface PanelIssue {
   name: string
   priority: string
   state: string
+  stateId: string
   assignees: string[]
   targetDate?: string
 }
+
+/** One workflow state the quick-edit selector offers. */
+interface PanelState {
+  id: string
+  name: string
+  group: string
+}
+
+/** Priorities the quick-edit selector offers, Plane's vocabulary. */
+const PRIORITIES = ['urgent', 'high', 'medium', 'low', 'none'] as const
 
 /**
   * Render the Plane panel tab.
@@ -51,6 +64,8 @@ export function PlanePanelTab(): ReactNode {
   const [selected, setSelected] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | undefined>(undefined)
+  const [draft, setDraft] = useState('')
+  const [creating, setCreating] = useState(false)
   const selectedRef = useRef('')
 
   /** Fetch one panel page; append or replace the visible issues. */
@@ -85,6 +100,62 @@ export function PlanePanelTab(): ReactNode {
     return () => { clearInterval(timer) }
   }, [load])
 
+  /** Create one work item in the selected project through the keyless ui surface. */
+  const createIssue = useCallback(async (): Promise<void> => {
+    const workspace = payload?.workspace ?? ''
+    const projectId = selectedRef.current
+    const name = draft.trim()
+    if (creating || workspace.length === 0 || projectId.length === 0 || name.length === 0) return
+    setCreating(true)
+    try {
+      const response = await fetch(
+        '/plugins/dsh-plane/ui/v1/workspaces/' + encodeURIComponent(workspace) + '/projects/' + encodeURIComponent(projectId) + '/work-items/',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name }),
+        },
+      )
+      if (!response.ok) {
+        const detail = await response.text()
+        setError('HTTP ' + response.status + ': ' + detail.slice(0, 200))
+        return
+      }
+      setDraft('')
+      await load(projectId, undefined, false)
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : String(fetchError))
+    } finally {
+      setCreating(false)
+    }
+  }, [creating, draft, load, payload])
+
+  /** Quick-edit one work item's priority or state through the ui surface. */
+  const patchIssue = useCallback(async (issueId: string, body: Record<string, unknown>): Promise<void> => {
+    const workspace = payload?.workspace ?? ''
+    const projectId = selectedRef.current
+    if (workspace.length === 0 || projectId.length === 0) return
+    try {
+      const response = await fetch(
+        '/plugins/dsh-plane/ui/v1/workspaces/' + encodeURIComponent(workspace)
+          + '/projects/' + encodeURIComponent(projectId) + '/work-items/' + encodeURIComponent(issueId) + '/',
+        {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        },
+      )
+      if (!response.ok) {
+        const detail = await response.text()
+        setError('HTTP ' + response.status + ': ' + detail.slice(0, 200))
+        return
+      }
+      await load(projectId, undefined, false)
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : String(fetchError))
+    }
+  }, [load, payload])
+
   if (payload !== undefined && !payload.ok) {
     const banner = payload.error === 'no-workspace' ? t('panelNoWorkspace') : t('panelNotConfigured')
     return (
@@ -95,6 +166,7 @@ export function PlanePanelTab(): ReactNode {
     )
   }
   const projects = payload?.projects ?? []
+  const states = payload?.states ?? []
   const nextCursor = payload?.nextCursor
   return (
     <div style={paneStyle}>
@@ -121,6 +193,22 @@ export function PlanePanelTab(): ReactNode {
       {payload?.workspace !== undefined && payload.workspace.length > 0 && (
         <p style={metaStyle}>{payload.workspace}{payload.totalCount !== undefined ? ' · ' + t('panelIssuesCount', { n: payload.totalCount }) : ''}</p>
       )}
+      {payload?.backend === 'local' && (selected.length > 0 || (payload.projectId ?? '').length > 0) && (
+        <div style={createRowStyle}>
+          <input
+            style={createInputStyle}
+            value={draft}
+            placeholder={t('panelCreatePlaceholder')}
+            disabled={creating}
+            onChange={event => { setDraft(event.target.value) }}
+            onKeyDown={event => { if (event.key === 'Enter') void createIssue() }}
+          />
+          <button type="button" style={iconButtonStyle} disabled={creating || draft.trim().length === 0} onClick={() => { void createIssue() }}>{creating ? t('panelCreating') : t('panelCreate')}</button>
+        </div>
+      )}
+      {payload?.backend === 'local' && (
+        <a style={boardLinkStyle} href="/plugins/dsh-plane/app" target="_blank" rel="noreferrer">{t('panelOpenBoard')} ↗</a>
+      )}
       {error !== undefined && <p style={bannerStyle}>{t('panelError')}: {error} <button type="button" style={linkStyle} onClick={() => { void load(selectedRef.current, undefined, false) }}>{t('panelRetry')}</button></p>}
       {payload?.issueError !== undefined && <p style={bannerStyle}>{payload.issueError}</p>}
       {issues.length === 0 && !loading && error === undefined && payload?.issueError === undefined && (
@@ -134,8 +222,24 @@ export function PlanePanelTab(): ReactNode {
               <span style={nameStyle}>{issue.name}</span>
             </div>
             <div style={rowMetaStyle}>
-              <span style={stateStyle}>{issue.state}</span>
-              <span style={priorityStyle(issue.priority)}>{issue.priority}</span>
+              {states.length > 0 && issue.stateId.length > 0 ? (
+                <select
+                  style={quickSelectStyle}
+                  value={issue.stateId}
+                  onChange={event => { void patchIssue(issue.id, { state: event.target.value }) }}
+                >
+                  {states.map(state => <option key={state.id} value={state.id}>{state.name}</option>)}
+                </select>
+              ) : (
+                <span style={stateStyle}>{issue.state}</span>
+              )}
+              <select
+                style={{ ...quickSelectStyle, color: priorityStyle(issue.priority).color }}
+                value={issue.priority}
+                onChange={event => { void patchIssue(issue.id, { priority: event.target.value }) }}
+              >
+                {PRIORITIES.map(priority => <option key={priority} value={priority}>{priority}</option>)}
+              </select>
               {issue.assignees.length > 0 && <span>{issue.assignees.join(', ')}</span>}
             </div>
           </div>
@@ -189,6 +293,26 @@ const moreStyle: CSSProperties = {
   color: 'var(--dsw-alias-accent, #4c8bf5)',
 }
 const metaStyle: CSSProperties = { margin: 0, fontSize: 11, color: 'var(--dsw-alias-label-tertiary, rgba(128,128,128,0.9))' }
+const createRowStyle: CSSProperties = { display: 'flex', gap: 6, alignItems: 'center' }
+const createInputStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  padding: '4px 8px',
+  fontSize: 12,
+  borderRadius: 7,
+  border: '1px solid var(--dsw-alias-border, rgba(128, 128, 128, 0.32))',
+  background: 'var(--dsw-alias-surface-0, transparent)',
+  color: 'var(--dsw-alias-label-primary, inherit)',
+}
+const quickSelectStyle: CSSProperties = {
+  padding: '0 4px',
+  fontSize: 10.5,
+  borderRadius: 5,
+  border: '1px solid var(--dsw-alias-border, rgba(128, 128, 128, 0.32))',
+  background: 'var(--dsw-alias-surface-0, transparent)',
+  color: 'var(--dsw-alias-label-secondary, inherit)',
+}
+const boardLinkStyle: CSSProperties = { all: 'unset', cursor: 'pointer', fontSize: 11, color: 'var(--dsw-alias-accent, #4c8bf5)' }
 const bannerStyle: CSSProperties = { margin: 0, fontSize: 11.5, lineHeight: 1.5, padding: '6px 8px', borderRadius: 7, background: 'var(--dsw-alias-surface-2, rgba(128,128,128,0.12))', color: 'var(--dsw-alias-label-secondary, inherit)' }
 const emptyStyle: CSSProperties = { ...metaStyle, padding: '8px 2px' }
 const listStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6 }

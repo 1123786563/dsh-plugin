@@ -59,3 +59,21 @@ await writeFile(
 if (map.length > 0) {
   await writeFile(outfile + '.map', map, 'utf8')
 }
+
+// The standalone board page: one self-contained IIFE shipping its own React,
+// served by the host half at /plugins/dsh-plane/app (no module loader, no
+// host runtime dependency).
+const appRoot = resolve(root, 'lib/app.js')
+await build({
+  entryPoints: [resolve(root, 'src/app/main.tsx')],
+  bundle: true,
+  format: 'iife',
+  platform: 'browser',
+  target: 'es2022',
+  jsx: 'automatic',
+  sourcemap: false,
+  outfile: appRoot,
+  legalComments: 'none',
+  minify: true,
+  logLevel: 'info',
+})

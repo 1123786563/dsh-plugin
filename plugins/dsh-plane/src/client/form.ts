@@ -33,10 +33,13 @@ export interface PlaneScopeSnapshot {
 }
 
 /** The plane namespace fields the card edits. */
-export type PlaneField = 'baseUrl' | 'apiKey' | 'workspaceSlug' | 'defaultProjectId' | 'perPage'
+export type PlaneField = 'backend' | 'baseUrl' | 'apiKey' | 'workspaceSlug' | 'defaultProjectId' | 'dataDir' | 'perPage'
 
-/** Every field except perPage is free text; perPage is an integer in 1..100. */
-const TEXT_FIELDS: readonly PlaneField[] = ['baseUrl', 'apiKey', 'workspaceSlug', 'defaultProjectId']
+/** Every field except perPage is free text; perPage is an integer in 1..100, backend local|remote. */
+const TEXT_FIELDS: readonly PlaneField[] = ['backend', 'baseUrl', 'apiKey', 'workspaceSlug', 'defaultProjectId', 'dataDir']
+
+/** The backends the card offers. */
+export const PLANE_BACKENDS: readonly string[] = ['local', 'remote']
 
 /** One field as the card renders it. */
 export interface PlaneFieldState {
@@ -66,6 +69,8 @@ export interface PlaneCardState {
   failed: boolean
   /** The rejection reason the Host returned for the last failed save. */
   failedReason?: string
+  /** The currently selected backend ('local' | 'remote'); drives conditional fields. */
+  backend: string
   /** One PlaneFieldState per edited field. */
   fields: Record<PlaneField, PlaneFieldState>
 }
@@ -233,7 +238,7 @@ export class PlaneSettingsCardController {
       const text = staged?.text ?? (field === 'apiKey' && snapshot.user?.[field] !== undefined ? '' : this.stored(field))
       const fieldInvalid = field === 'perPage' && text.length > 0
         ? !/^\d+$/.test(text) || Number.parseInt(text, 10) < 1 || Number.parseInt(text, 10) > 100
-        : false
+        : field === 'backend' && text.length > 0 && !PLANE_BACKENDS.includes(text)
       invalid = invalid || fieldInvalid
       fields[field] = {
         text,
@@ -251,6 +256,7 @@ export class PlaneSettingsCardController {
       failed: this.failed,
       ...(this.failedReason === undefined ? {} : { failedReason: this.failedReason }),
       fields,
+      backend: (this.staged.get('backend')?.text ?? (this.stored('backend') || 'local')) as string,
     }
   }
 

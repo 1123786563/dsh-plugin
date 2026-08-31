@@ -1,7 +1,7 @@
 {
   "name": "dsh-plane",
   "version": "0.1.0",
-  "description": "Plane (makeplane) tools for DeepSeek Harness: drive projects, work items, comments, cycles, states, and labels over the Plane REST API, plus a raw-request escape hatch for every other endpoint",
+  "description": "Plane (makeplane) as a DeepSeek Harness plugin: an in-process Plane-compatible engine (no external service, JSON store) serving the plane_* tool family, a /api/v1-compatible HTTP surface for SDKs and MCP servers, a settings card, a sidebar panel, and a standalone board page — with a remote backend for Plane Cloud or self-hosted instances",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -59,8 +59,10 @@
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^24.13.3",
     "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
     "esbuild": "^0.25.0",
     "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "tsdown": "0.22.2",
     "typescript": "^5.5.0",
     "vitest": "^4.1.8"

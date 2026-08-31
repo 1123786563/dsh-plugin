@@ -1,14 +1,30 @@
 # dsh-plane（中文说明）
 
-把 [Plane](https://github.com/makeplane/plane) 接入 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）：agent 获得一族 `plane_*` 工具，通过 Plane REST API 操作项目、工作项（issue）、评论、周期、状态与标签，另有一个可触达其余全部端点的原始请求逃生口。Web UI 侧新增**设置卡片**（设置 → 插件）与 **Plane 侧边栏面板**（需 better-sidebar）。
+把 [Plane](https://github.com/makeplane/plane) 做成 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）插件——**Plane 兼容引擎直接跑在宿主进程内**：无容器、无 Python、无数据库服务。引擎为 TypeScript 实现的 Plane 兼容域模型（工作区、项目、工作项、状态、标签、周期、模块、评论），数据落在 `$DSH_HOME/plane` 下的 JSON 存储；对外提供 `/api/v1` 兼容 HTTP 面（plane-sdk、plane-mcp-server、curl 可直接指向）、agent 的 `plane_*` 工具族、设置卡片（设置 → 插件）、侧边栏面板，以及整页看板 `/plugins/dsh-plane/app`。
 
-同时支持 Plane Cloud（`api.plane.so`）与自建实例。客户端按激活探测一次 `work-items` 与旧版 `issues` 资源段，新版与旧版社区版都能用。
+这是对 Plane 公开 API 契约的净室兼容实现——未 vendor、未复制任何 Plane 源码（Plane 为 AGPL-3.0，本插件保持 MIT）。需要完整 Plane 功能（页面、视图、需求池、SSO、实时协作）时，把 `backend` 切到 `remote`，同一套工具直连 Plane Cloud 或自托管实例。
+
+## 组成
+
+```
+plane_* 工具 ───────┐
+看板页（ui）────────┼── PlaneV1Router ── PlaneEngine ── store.json（$DSH_HOME/plane）
+外部 SDK/MCP ───────┘   （进程内路由）     （域操作）      （原子写 + .bak 备份）
+                       ▲
+                       └─ /plugins/dsh-plane/api/v1/*  — X-API-Key 鉴权
+                       └─ /plugins/dsh-plane/ui/v1/*   — 同源免 key
+```
+
+- **`local` 后端（默认）**：引擎在首次使用时惰性启动，播种 `dsh` 工作区、`DSH` 项目与 Plane 默认五状态（Backlog / Todo / In Progress / Done / Cancelled）。工作项按项目自增编号（`DSH-1`、`DSH-2`…）；进入 completed 组状态自动盖 `completed_at`。每次变更经串行原子保存链落盘（tmp + rename，旧文件保留为 `.bak`，损坏自动回退）。
+- **`remote` 后端**：与引擎化之前完全一致——面向 Plane Cloud（`api.plane.so`）或自建实例的 REST 客户端，按激活探测一次 `work-items` 与旧版 `issues` 资源段。设置卡片保存即切换后端，无需重启。
 
 ## 工具一览
 
 | 工具 | 作用 |
 | --- | --- |
 | `plane_list_projects` | 分页列出工作区项目 |
+| `plane_create_project` | 创建项目（自动播种默认状态） |
+| `plane_update_project` | 局部更新项目（名称、标识、描述、可见性） |
 | `plane_list_issues` | 分页列出项目内工作项，支持排序 |
 | `plane_search_issues` | 按名称、描述或编号搜索工作项（全工作区或单项目） |
 | `plane_get_issue` | 读取单个工作项完整详情 |
@@ -18,25 +34,33 @@
 | `plane_list_issue_comments` | 列出工作项下的讨论 |
 | `plane_create_issue_comment` | 在工作项下发表评论 |
 | `plane_list_metadata` | 列出项目的状态、标签或周期 |
-| `plane_request` | 对任意 `/api/v1` 路径发 `GET/POST/PATCH/DELETE`（模块、需求池、里程碑、成员、团队空间……） |
+| `plane_request` | 对任意 `/api/v1` 路径发 `GET/POST/PATCH/DELETE`（模块、周期挂摘、成员……） |
 
-列表类工具返回裁剪后的投影（id、名称、状态、经办人、标签、日期），控制模型上下文体积；详情类工具返回完整解码行。分页信封统一为 `{ results, totalCount, nextCursor, hasNextPage }`。
+列表类工具返回裁剪后的投影，控制模型上下文体积。本地引擎输出 Plane 真实信封键（`total_count`、`next_cursor`、`prev_cursor`、`next_page_results`…）与 `value:offset:is_prev` 游标，与公开 API 对齐。
+
+## HTTP 面（local 后端）
+
+| 路径 | 鉴权 | 用途 |
+| --- | --- | --- |
+| `/plugins/dsh-plane/api/v1/...` | `X-API-Key: <引擎 key>` | v1 兼容面——plane-sdk、plane-mcp-server、curl 指向这里 |
+| `/plugins/dsh-plane/ui/v1/...` | 同源免 key | 同一路由器的浏览器半区入口——key 不进页面 |
+| `/plugins/dsh-plane/app` | 同源免 key | 整页看板（看板/列表视图、详情抽屉、评论） |
+| `/plugins/dsh-plane/panel` `/state` | 同源免 key | 面板数据与连接/引擎状态 |
+
+引擎 key 首次启动生成，设置卡片（local 后端）可见。v1 面覆盖工作项、项目、状态、标签、周期（含挂摘）、模块（含挂摘）、成员与 `users/me`；`work-items/` 与旧版 `issues/` 双路径段可用，其余路径 404 带清晰错误。
 
 ## 设置卡片（Web UI）
 
-插件在宿主侧注册 `plane` 设置命名空间，在浏览器侧为它在官方插件配置标签页注册**恰好一张**卡片，配置入口就是**设置 → 插件**：
+配置入口是**设置 → 插件**，`plane` 命名空间：
 
-- `baseUrl` — Plane Cloud 或自建实例地址
-- `apiKey` — 个人访问令牌；按 secret 存储（读回脱敏，留空草稿表示"不修改"）
-- `workspaceSlug` — 调用未显式传 workspace 时的默认值
-- `defaultProjectId` — 可选默认项目
-- `perPage` — 列表页大小，1-100
-
-保存走持久的、带版本围栏的设置文档；提交后**即时重配工具，无需重启**。组合入口（`cordis.patch.yml`）在没有设置服务挂载时作为回退层。
+- `backend` — `local`（进程内引擎）或 `remote`（REST 客户端）；保存即切换
+- local：`dataDir`（存储目录，默认 `$DSH_HOME/plane`，改动重启后生效）+ 引擎状态块（项目/工作项/评论计数与引擎 API Key）
+- remote：`baseUrl`、`apiKey`（secret 存储，读回脱敏，留空草稿表示"不修改"）
+- 两者通用：`workspaceSlug`（local 回退播种的 `dsh`）、`defaultProjectId`、`perPage`
 
 ## 侧边栏面板（better-sidebar）
 
-装有 better-sidebar 时，侧边栏多出一个 Plane 标签页：配置工作区的项目下拉、所选项目的工作项列表（状态 / 优先级 / 经办人）、"加载更多"分页、30 秒自动刷新。数据来自宿主的只读路由 `/plugins/dsh-plane/panel`——**API Key 永不进入浏览器**。未配置 Key 或工作区时显示引导横幅。
+装有 better-sidebar 时，侧边栏 Plane 标签页展示项目下拉与工作项列表，local 模式下支持内联新建、状态/优先级快改，并提供整页看板入口。数据全部来自宿主侧路由——**remote 的 API Key 永不进入浏览器**。
 
 ## 安装到 dsh profile
 
@@ -44,44 +68,26 @@
 pnpm dsh plugin --profile web add link:/path/to/dsh-plane
 ```
 
-包声明了 `dsh.bundle.patch` 与 `dsh.client`（web），`dsh plugin` 会自动把 `dsh-plane` 追加进 `dsh.profile.bundles`，Web UI 在 `/plugins` 下直接服务浏览器半区——无需重新构建 web 应用。发布后也可以：
-
-```sh
-pnpm dsh plugin --profile web add dsh-plane            # npm
-pnpm dsh plugin --profile web add github:you/dsh-plane # github
-```
-
-修改 bundle 列表后需重启 `dsh web`（或 headless 运行），插件树在启动时组装。
+包声明了 `dsh.bundle.patch` 与 `dsh.client`（web）。修改 bundle 列表后重启 `dsh web`。除此之外无需部署任何东西——local 后端零容器、零服务。
 
 ## 配置
 
-三层，后者覆盖前者：bundle 补丁的环境变量默认值 → profile 的 `cordis.patch.yml` → 卡片写入的设置文档。
-
-```yaml
-# profile cordis.patch.yml
-- id: plane
-  config:
-    baseUrl: https://plane.example.com   # 默认 https://api.plane.so（Plane Cloud）
-    apiKey: plane_api_xxx                # X-API-Key；个人设置 > 个人访问令牌
-    workspaceSlug: my-team               # 调用未显式传 workspace 时的默认值
-    defaultProjectId: ''                 # 可选默认项目
-    perPage: 50                          # 列表页大小，上限 100
-```
-
-dsh 进程能看到变量时，`!!js process.env.PLANE_API_KEY` 形式也可用。`apiKey` 为空时一切照常注册，调用会带着配置指引失败，不会拖垮启动树。优先用设置卡片——免重启、即时生效。
+三层，后者覆盖前者：bundle 补丁的环境变量默认值（`PLANE_BACKEND`、`PLANE_BASE_URL`、`PLANE_API_KEY`、`PLANE_WORKSPACE_SLUG`、`PLANE_DEFAULT_PROJECT_ID`、`DSH_PLANE_DATA_DIR`）→ profile 的 `cordis.patch.yml` → 卡片写入的设置文档。
 
 ## 开发
 
 ```sh
 pnpm install
-pnpm test        # vitest，fetch 打桩（client、tools、卡片表单、面板路由）
+pnpm test        # vitest：引擎域、v1 路由契约、双后端工具、路由、卡片表单
 pnpm typecheck
-pnpm build       # tsc 声明到 lib/types，tsdown 宿主包，esbuild 客户端工厂到 lib/client.js
+pnpm build       # tsc 声明、tsdown 宿主包、esbuild 客户端工厂 + 整页看板 bundle
 ```
 
-结构：`src/client.ts` REST 客户端（鉴权、错误映射、资源段协商、分页、活配置访问器），`src/view.ts` 投影裁剪，`src/tools.ts` 工具定义，`src/routes.ts` 只读面板/状态路由，`src/config.ts` schemastery 配置（apiKey 为 `role('secret')`），`src/index.ts` 宿主入口（工具 + 设置命名空间 + 路由），`src/client/*` 浏览器半区（卡片表单、设置卡片、面板、多语言）。
+结构：`src/engine/` 域引擎（模型、JSON 存储、分页、序列化、key），`src/api/router.ts` v1 兼容路由器（工具、HTTP 挂载、测试三方共用），`src/backend.ts` local/remote 后端接缝，`src/client.ts` 远端 REST 客户端，`src/tools.ts` 工具定义，`src/routes.ts` webServer 挂载，`src/client/*` 设置卡片半区，`src/app/` 整页看板。
 
-浏览器产物是客户端模块系统的 lazy-CJS 工厂形态：一个只注册 `window.__ModuleLoader__.load({ id, factory })` 的经典脚本，React 外置，服务经 cordis 注入（`scripts/build-client.mjs`）。
+## v1 边界（有意不做）
+
+页面（Pages）、视图、需求池、工作项关联、附件/webhook、多用户经办人（引擎单主体——即 key 持有者）、实时协作、remote→local 数据迁移。local 后端下按 casdoor 身份映射经办人是 v2 候选。
 
 ## 许可
 

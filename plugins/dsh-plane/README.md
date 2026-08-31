@@ -1,14 +1,30 @@
 # dsh-plane
 
-[Plane](https://github.com/makeplane/plane) as a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) plugin: the agent gets a `plane_*` tool family over the Plane REST API — projects, work items (issues), comments, cycles, states, labels — plus a raw-request escape hatch that reaches every other endpoint. The Web UI gains a **settings card** (Settings → Plugins) and a **Plane sidebar panel** (requires better-sidebar).
+[Plane](https://github.com/makeplane/plane) as a [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) plugin — **with the Plane engine running inside the harness process**, no containers, no Python, no database server: a TypeScript Plane-compatible engine (workspaces, projects, work items, states, labels, cycles, modules, comments) persisting to a JSON store under `$DSH_HOME/plane`, a `/api/v1`-compatible HTTP surface official tooling (plane-sdk, plane-mcp-server, curl) can point at, the agent's `plane_*` tool family, a settings card (Settings → Plugins), a sidebar panel, and a standalone board page at `/plugins/dsh-plane/app`.
 
-Works with Plane Cloud (`api.plane.so`) and self-hosted instances. The client probes `work-items` vs the legacy `issues` resource segment once per activation, so current and older community editions both work.
+This is a clean-room compatible implementation of Plane's public API contract — no Plane source code is vendored or copied (Plane is AGPL-3.0; this plugin stays MIT). When you need the full Plane feature set (pages, views, intake, SSO, live collaboration) flip `backend` to `remote` and point the same tools at Plane Cloud or a self-hosted instance.
+
+## How it fits together
+
+```
+plane_* tools ──────┐
+board page (ui) ────┼── PlaneV1Router ── PlaneEngine ── store.json ($DSH_HOME/plane)
+external SDK/MCP ───┘   (in-process)      (domain ops)    (atomic writes + .bak)
+                       ▲
+                       └─ /plugins/dsh-plane/api/v1/*  — X-API-Key guarded
+                       └─ /plugins/dsh-plane/ui/v1/*   — same-origin, keyless
+```
+
+- **Backend `local` (default)**: the engine boots lazily on first use, seeds one `dsh` workspace, one `DSH` project, and Plane's default workflow states (Backlog / Todo / In Progress / Done / Cancelled). Work items get per-project sequence ids (`DSH-1`, `DSH-2`, …); entering a completed state stamps `completed_at`. Every mutation persists through a serial atomic-save chain (tmp + rename, previous file kept as `.bak`, restore-on-corrupt).
+- **Backend `remote`**: the exact pre-engine behavior — a REST client over Plane Cloud (`api.plane.so`) or a self-hosted instance, with the once-per-activation `work-items` vs legacy `issues` segment negotiation. Settings-card saves flip the backend live, no restart.
 
 ## Tools
 
 | Tool | What it does |
 | --- | --- |
 | `plane_list_projects` | List workspace projects, one cursor page at a time |
+| `plane_create_project` | Create a project (seeds the default states) |
+| `plane_update_project` | Partially update a project (name, identifier, description, network) |
 | `plane_list_issues` | List a project's work items with pagination and ordering |
 | `plane_search_issues` | Search work items by name, description, or identifier (workspace-wide or in one project) |
 | `plane_get_issue` | Fetch one work item with full detail |
@@ -18,25 +34,33 @@ Works with Plane Cloud (`api.plane.so`) and self-hosted instances. The client pr
 | `plane_list_issue_comments` | List the discussion on one work item |
 | `plane_create_issue_comment` | Comment on one work item |
 | `plane_list_metadata` | List states, labels, or cycles of one project |
-| `plane_request` | Raw `GET/POST/PATCH/DELETE` against any `/api/v1` path (modules, intake, milestones, members, teamspaces, ...) |
+| `plane_request` | Raw `GET/POST/PATCH/DELETE` against any `/api/v1` path (modules, intake, milestones, members, ...) |
 
-List tools return curated projections (ids, names, states, assignees, labels, dates) so a page stays small in the model context; detail tools return the full decoded row. Cursor envelopes are normalized to `{ results, totalCount, nextCursor, hasNextPage }`.
+List tools return curated projections so a page stays small in the model context; cursor envelopes are normalized to `{ results, totalCount, nextCursor, hasNextPage }`. The local engine emits Plane's real envelope keys (`total_count`, `next_cursor`, `prev_cursor`, `next_page_results`, …) with `value:offset:is_prev` cursors, matching the public API.
+
+## HTTP surfaces (local backend)
+
+| Path | Auth | Serves |
+| --- | --- | --- |
+| `/plugins/dsh-plane/api/v1/...` | `X-API-Key: <engine key>` | The v1-compatible surface — point plane-sdk, plane-mcp-server, or curl here |
+| `/plugins/dsh-plane/ui/v1/...` | same-origin (none) | The same router, for the plugin's own browser half — the key never reaches the page |
+| `/plugins/dsh-plane/app` | same-origin (none) | The standalone board page (board/list views, detail drawer, comments) |
+| `/plugins/dsh-plane/panel` `/state` | same-origin (none) | Sidebar panel data and connection/engine status |
+
+The engine's key is generated on first boot and shown in the settings card (local backend). The v1 surface covers work items, projects, states, labels, cycles (+ cycle-issues), modules (+ module-issues), members, and `users/me`; both `work-items/` and legacy `issues/` path segments work. Anything else answers 404 with a clear error.
 
 ## Settings card (Web UI)
 
-The plugin registers the `plane` settings namespace on the Host and one card for it in the browser's official plugin-configuration tab, so configuration lives in **Settings → Plugins**:
+Configuration lives in **Settings → Plugins**, on the `plane` namespace:
 
-- `baseUrl` — Plane Cloud or your instance origin
-- `apiKey` — personal access token; stored as a secret (role `secret`: redacted on read-back, an empty draft means "keep unchanged")
-- `workspaceSlug` — default workspace for calls that omit it
-- `defaultProjectId` — optional default project
-- `perPage` — list page size, 1-100
-
-Saves go through the durable, revision-fenced settings document; committed changes **reconfigure the tools live — no restart**. The composition entry (`cordis.patch.yml`) stays the fallback layer when no settings service is mounted.
+- `backend` — `local` (in-process engine) or `remote` (REST client); saves flip live
+- local: `dataDir` (store directory, default `$DSH_HOME/plane`; changes apply after restart), plus a live engine status block (project/work-item/comment counts and the engine API key)
+- remote: `baseUrl`, `apiKey` (secret role — redacted on read-back, empty draft means "keep unchanged")
+- both: `workspaceSlug` (local falls back to the seeded `dsh`), `defaultProjectId`, `perPage`
 
 ## Sidebar panel (better-sidebar)
 
-When better-sidebar is installed, a Plane tab joins the sidebar: a project picker over the configured workspace, the selected project's work items (state / priority / assignees), pagination via "load more", and a 30 s auto-refresh. Data comes from the Host's read-only `/plugins/dsh-plane/panel` route — **the API key never reaches the browser**. Without a key or workspace the panel shows setup banners instead.
+With better-sidebar installed, the Plane tab shows the workspace's projects and the selected project's work items with inline quick-edit (state and priority selects), an inline create box, and a link to the full board page (local backend). Remote mode keeps the read-only list behavior. Data comes from the Host's routes — **the remote API key never reaches the browser**.
 
 ## Install into a dsh profile
 
@@ -44,56 +68,26 @@ When better-sidebar is installed, a Plane tab joins the sidebar: a project picke
 pnpm dsh plugin --profile web add link:/path/to/dsh-plane
 ```
 
-The package declares `dsh.bundle.patch` and `dsh.client` (web), so `dsh plugin` appends `dsh-plane` to `dsh.profile.bundles` automatically and the Web UI serves the browser half under `/plugins` — no rebuild of the web application. From a published package:
-
-```sh
-pnpm dsh plugin --profile web add dsh-plane            # npm registry
-pnpm dsh plugin --profile web add github:you/dsh-plane # github spec
-```
-
-Restart `dsh web` (or the headless run) after changing the bundle list; the tree composes at boot.
+The package declares `dsh.bundle.patch` and `dsh.client` (web); restart `dsh web` after changing the bundle list. Nothing else to deploy — the local backend needs no containers or services.
 
 ## Configure
 
-Three layers, later wins: the bundle patch's env defaults → the profile's `cordis.patch.yml` (`~/.dsh/profiles/<name>/cordis.patch.yml`) → the settings document the card writes.
-
-```yaml
-# profile cordis.patch.yml
-- id: plane
-  config:
-    baseUrl: https://plane.example.com   # default https://api.plane.so (Plane Cloud)
-    apiKey: plane_api_xxx                # X-API-Key; Profile Settings > Personal Access Tokens
-    workspaceSlug: my-team               # default workspace for calls that omit it
-    defaultProjectId: ''                 # optional default project
-    perPage: 50                          # list page size, max 100
-```
-
-`!!js process.env.PLANE_API_KEY` style values work when the dsh process sees the variable. An empty `apiKey` keeps everything registered; calls then fail with setup instructions instead of failing the boot tree. Prefer the settings card — it is live without a restart.
-
-### Choosing values
-
-- `baseUrl`: `https://api.plane.so` on Plane Cloud; your instance origin when self-hosted (a trailing `/api/v1` is tolerated).
-- `workspaceSlug`: the URL segment after the host, e.g. `my-team` in `https://app.plane.so/my-team/projects/`.
-- `apiKey`: create in Plane under Profile Settings, Personal Access Tokens. The key acts as its owner; comments and created items carry that identity.
+Three layers, later wins: the bundle patch's env defaults (`PLANE_BACKEND`, `PLANE_BASE_URL`, `PLANE_API_KEY`, `PLANE_WORKSPACE_SLUG`, `PLANE_DEFAULT_PROJECT_ID`, `DSH_PLANE_DATA_DIR`) → the profile's `cordis.patch.yml` → the settings document the card writes.
 
 ## Development
 
 ```sh
 pnpm install
-pnpm test        # vitest, fetch stubbed (client, tools, card form, panel routes)
+pnpm test        # vitest: engine domain, v1 router contract, tools over both backends, routes, card form
 pnpm typecheck
-pnpm build       # tsc declarations to lib/types, tsdown host bundle, esbuild client factory to lib/client.js
+pnpm build       # tsc declarations, tsdown host bundle, esbuild client factory + standalone board bundle
 ```
 
-Layout: `src/client.ts` REST client (auth, errors, item-segment negotiation, pagination, live-config accessor), `src/view.ts` context-frugal projections, `src/tools.ts` tool definitions, `src/routes.ts` read-only panel/state routes, `src/config.ts` schemastery config (apiKey is `role('secret')`), `src/index.ts` host entry (tools + settings namespace + routes), `src/client/*` browser half (card form, settings card, panel, locales).
+Layout: `src/engine/` the domain engine (models, JSON store, pagination, serializers, key), `src/api/router.ts` the v1-compatible router (path matching shared by tools, HTTP mounts, and tests), `src/backend.ts` the local/remote backend seam, `src/client.ts` the remote REST client, `src/tools.ts` tool definitions, `src/routes.ts` the webServer mounts, `src/client/` the settings-card half, `src/app/` the standalone board page.
 
-The browser artifact is the client module system's lazy-CJS factory form: one classic script that only registers `window.__ModuleLoader__.load({ id, factory })`, React external, services through cordis injection (`scripts/build-client.mjs`).
+## v1 boundaries (intentionally out)
 
-## Notes
-
-- Scopes: personal access tokens carry the owner's permissions; there is no per-tool scope narrowing in this plugin yet.
-- Rate limits surface as `Plane API 429` errors with the response excerpt; retry after a pause.
-- `plane_request` rejects absolute URLs and `..` traversal; every path is rooted at `/api/v1`.
+Pages, views, intake, work-item relations, attachments/webhooks, multi-user assignees (the engine is single-principal — the API key owner), live collaboration, and remote→local data migration. Casdoor-backed identities per assignee are a v2 candidate on the local backend.
 
 ## License
 

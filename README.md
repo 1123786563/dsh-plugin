@@ -6,7 +6,7 @@ DeepSeek Harness（DSH）插件集合 monorepo。每个子目录 `plugins/<name>
 
 | 目录 | 说明 |
 | --- | --- |
-| `plugins/dsh-plane` | Plane（makeplane）项目跟踪：`plane_*` 工具族、设置卡片（设置 → 插件）、better-sidebar 面板 |
+| `plugins/dsh-plane` | Plane（makeplane）项目跟踪：**进程内 Plane 兼容引擎**（零外部服务，JSON 存储）+ `/api/v1` 兼容 HTTP 面（SDK/MCP 可指向）+ `plane_*` 工具族 + 设置卡片 + better-sidebar 面板 + 整页看板；`backend: remote` 可切 Plane Cloud/自托管实例 |
 | `plugins/dsh-job-search` | 租户隔离求职：`job_search_*` 工具族（建档/抓取/排序/投递/面试/结果）+ 会话头部"求职看板" |
 | `plugins/dsh-open-design` | OpenDesign 设计引擎技能目录：以 `open-design` 提供者向宿主技能注册表注册 77 个设计技能 + 152 个品牌级设计系统 + 固定幻灯片框架（来自 nexu-io/open-design，Apache-2.0） |
 | `plugins/dsh-openmeter` | OpenMeter 计费：LLM 调用逐条计量（WAL 至少一次投递）→ 自托管 fork；预付余额耗尽硬阻断（故障放行）；llm-cost 价格库 CNY 报价 + 即时估算；侧边栏用量面板 + 收银台（客户/充值/阻断/预设绑定） |
@@ -37,7 +37,7 @@ docker compose up -d        # casdoor（认证 IdP）+ casdoor-gateway（认证�
 | openmeter（fork 全栈：kafka/clickhouse/postgres/redis + server/sink/balance/billing） | `127.0.0.1:8888`（插件默认 endpoint） | dsh-openmeter |
 | nocobase（+ nocobase-postgres） | `127.0.0.1:13000` | dsh-nocobase |
 
-openmeter 镜像从同级 `../openmeter` 检出构建（fork 的 v3 API 是插件必需），可用 `OPENMETER_SRC_DIR` 覆盖路径。有意不并入：higress（官方安装脚本自管容器，走 `services/higress-gateway/install.sh`）、Plane（`dsh-plane` 面向 Plane Cloud 或既有自托管实例）。
+openmeter 镜像从同级 `../openmeter` 检出构建（fork 的 v3 API 是插件必需），可用 `OPENMETER_SRC_DIR` 覆盖路径。有意不并入：higress（官方安装脚本自管容器，走 `services/higress-gateway/install.sh`）、Plane（`dsh-plane` 的引擎跑在宿主进程内，天然零容器）。
 
 ## 安装某个插件到 dsh profile
 

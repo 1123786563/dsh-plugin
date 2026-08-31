@@ -4,6 +4,9 @@
  * canonical output shapes, all against a stubbed fetch.
  */
 
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -70,6 +73,7 @@ describe('registration', () => {
     expect([...registered.keys()].sort()).toEqual([
       'plane_create_issue',
       'plane_create_issue_comment',
+      'plane_create_project',
       'plane_delete_issue',
       'plane_get_issue',
       'plane_list_issue_comments',
@@ -79,6 +83,7 @@ describe('registration', () => {
       'plane_request',
       'plane_search_issues',
       'plane_update_issue',
+      'plane_update_project',
     ])
   })
 })
@@ -97,7 +102,7 @@ describe('plane_list_projects', () => {
       }),
     }])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', perPage: 7 })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', perPage: 7 })
     const value = await registered.get('plane_list_projects')?.execute({}, exec())
     expect(value).toEqual({
       projects: [
@@ -113,7 +118,7 @@ describe('plane_list_projects', () => {
   it('fails with a workspace hint when neither call nor config supplies one', async () => {
     stubFetch([])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k' })
+    apply(ctx, { backend: 'remote', apiKey: 'k' })
     await expect(registered.get('plane_list_projects')?.execute({}, exec())).rejects.toThrow(/workspaceSlug/)
   })
 })
@@ -137,7 +142,7 @@ describe('plane_list_issues', () => {
       },
     ])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     const value = await registered.get('plane_list_issues')?.execute({}, exec())
     expect(calls[0]?.url).toContain('/work-items/')
     expect(calls[1]?.url).toContain('/issues/')
@@ -161,7 +166,7 @@ describe('plane_list_issues', () => {
   it('rejects perPage outside 1..100', async () => {
     stubFetch([])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     await expect(registered.get('plane_list_issues')?.execute({ perPage: 101 }, exec())).rejects.toThrow(/perPage/)
     await expect(registered.get('plane_list_issues')?.execute({ perPage: 0 }, exec())).rejects.toThrow(/perPage/)
   })
@@ -171,7 +176,7 @@ describe('plane_search_issues', () => {
   it('searches the workspace when no project resolves', async () => {
     const calls = stubFetch([{ body: JSON.stringify({ results: [{ id: 'i9', name: 'SAML', identifier: 'OPS-2' }] }) }])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team' })
     const value = await registered.get('plane_search_issues')?.execute({ query: 'SAML', limit: 5 }, exec())
     expect(calls[0]?.url).toContain('/work-items/search/')
     expect(calls[0]?.url).toContain('search=SAML')
@@ -183,7 +188,7 @@ describe('plane_search_issues', () => {
   it('scopes the search to the resolved project', async () => {
     const calls = stubFetch([{ body: '[]' }])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     await registered.get('plane_search_issues')?.execute({ query: 'x' }, exec())
     expect(calls[0]?.url).toContain('project_id=p1')
     expect(calls[0]?.url).not.toContain('workspace_search')
@@ -194,7 +199,7 @@ describe('plane_create_issue', () => {
   it('maps camelCase arguments onto the Plane body', async () => {
     const calls = stubFetch([{ body: JSON.stringify({ id: 'i2', name: 'New' }) }])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     const value = await registered.get('plane_create_issue')?.execute({
       name: 'New',
       descriptionHtml: '<p>body</p>',
@@ -217,14 +222,14 @@ describe('plane_create_issue', () => {
   it('rejects a blank name before any request', async () => {
     const calls = stubFetch([])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     await expect(registered.get('plane_create_issue')?.execute({ name: '  ' }, exec())).rejects.toThrow(/name/)
     expect(calls).toHaveLength(0)
   })
 
   it('rejects an out-of-enum priority at the schema boundary', async () => {
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     await expect(registered.get('plane_create_issue')?.execute({ name: 'x', priority: 'catastrophic' }, exec()))
       .rejects.toThrow()
   })
@@ -234,7 +239,7 @@ describe('plane_update_issue', () => {
   it('PATCHes only the provided fields onto the item path', async () => {
     const calls = stubFetch([{ body: JSON.stringify({ id: 'i1', state: 's2' }) }])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     await registered.get('plane_update_issue')?.execute({ issueId: 'i1', state: 's2', priority: 'low' }, exec())
     expect(calls[0]?.method).toBe('PATCH')
     expect(calls[0]?.url).toContain('/work-items/i1/')
@@ -244,7 +249,7 @@ describe('plane_update_issue', () => {
   it('requires at least one mutable field', async () => {
     const calls = stubFetch([])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     await expect(registered.get('plane_update_issue')?.execute({ issueId: 'i1' }, exec())).rejects.toThrow(/at least one field/)
     expect(calls).toHaveLength(0)
   })
@@ -257,7 +262,7 @@ describe('plane comments', () => {
       { body: JSON.stringify({ id: 'c2', comment_html: '<p>done</p>' }) },
     ])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     const listed = await registered.get('plane_list_issue_comments')?.execute({ issueId: 'i1' }, exec())
     expect(listed).toEqual({
       comments: [{ id: 'c1', comment_html: '<p>hi</p>', comment_stripped: 'hi' }],
@@ -277,7 +282,7 @@ describe('plane_list_metadata', () => {
       body: JSON.stringify({ results: [{ id: 's1', name: 'Todo', group: 'unstarted', color: '#000' }] }),
     }])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     const value = await registered.get('plane_list_metadata')?.execute({ resource: 'states' }, exec())
     expect(calls[0]?.url).toContain('/projects/p1/states/')
     expect(value).toEqual({
@@ -292,7 +297,7 @@ describe('plane_request', () => {
   it('forwards method, path, scalar query, and body', async () => {
     const calls = stubFetch([{ body: JSON.stringify([{ id: 'm1' }]) }])
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team' })
     const value = await registered.get('plane_request')?.execute({
       method: 'POST',
       path: 'workspaces/team/projects/p1/modules/',
@@ -306,15 +311,42 @@ describe('plane_request', () => {
 
   it('rejects unknown methods at the schema boundary', async () => {
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k' })
+    apply(ctx, { backend: 'remote', apiKey: 'k' })
     await expect(registered.get('plane_request')?.execute({ method: 'PUT', path: '/x/' }, exec())).rejects.toThrow()
+  })
+})
+
+describe('local backend', () => {
+  it('serves the in-process engine end to end without any network call', async () => {
+    const calls = stubFetch([])
+    vi.stubEnv('DSH_PLANE_DATA_DIR', await mkdtemp(join(tmpdir(), 'dsh-plane-tools-')))
+    const { ctx, registered } = harness()
+    apply(ctx, undefined)
+    const project = await registered.get('plane_create_project')?.execute({ name: 'Local work', identifier: 'LOC' }, exec())
+    const projectId = String((project as { project: Record<string, unknown> }).project.id)
+    const created = await registered.get('plane_create_issue')?.execute({
+      name: 'first local item',
+      projectId,
+      descriptionHtml: '<p>engine powered</p>',
+      priority: 'high',
+    }, exec())
+    const issue = (created as { issue: Record<string, unknown> }).issue
+    expect(issue.identifier).toBe('LOC-1')
+    expect(issue.sequence_id).toBe(1)
+    const listed = await registered.get('plane_list_issues')?.execute({ projectId }, exec())
+    expect((listed as { issues: unknown[] }).issues).toHaveLength(1)
+    const searched = await registered.get('plane_search_issues')?.execute({ query: 'local item' }, exec())
+    expect((searched as { results: unknown[] }).results).toHaveLength(1)
+    const updated = await registered.get('plane_update_issue')?.execute({ issueId: String(issue.id), projectId, name: 'renamed' }, exec())
+    expect((updated as { issue: Record<string, unknown> }).issue.name).toBe('renamed')
+    expect(calls).toHaveLength(0)
   })
 })
 
 describe('rendering', () => {
   it('renders one compact line per projected work item', () => {
     const { ctx, registered } = harness()
-    apply(ctx, { apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
+    apply(ctx, { backend: 'remote', apiKey: 'k', workspaceSlug: 'team', defaultProjectId: 'p1' })
     const tool = registered.get('plane_list_issues')
     expect(tool).toBeDefined()
     const blocks = tool?.output.render({}, {

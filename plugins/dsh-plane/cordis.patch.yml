@@ -5,16 +5,24 @@
 # These env-driven values are the composition base layer. The Web UI settings
 # card (Settings > Plugins, the plane namespace this plugin registers) and the
 # profile's own cordis.patch.yml both override them; card saves reconfigure
-# the tools live. An empty apiKey leaves everything registered but every call
-# fails with setup instructions.
+# the tools live — including flipping the backend between the in-process
+# engine (local) and a remote Plane instance.
 
 - insert:
     - id: plane
       name: 'dsh-plane'
       config:
+        # local: the in-process Plane-compatible engine (default, no external
+        # service, data under $DSH_HOME/plane or $DSH_PLANE_DATA_DIR).
+        # remote: Plane Cloud or a self-hosted instance over REST.
+        backend: !!js process.env.PLANE_BACKEND ?? 'local'
+        # Remote backend only.
         baseUrl: !!js process.env.PLANE_BASE_URL ?? 'https://api.plane.so'
         apiKey: !!js process.env.PLANE_API_KEY ?? ''
+        # Empty falls back to the seeded 'dsh' workspace on the local backend.
         workspaceSlug: !!js process.env.PLANE_WORKSPACE_SLUG ?? ''
         defaultProjectId: !!js process.env.PLANE_DEFAULT_PROJECT_ID ?? ''
+        # Local backend only; empty uses $DSH_HOME/plane.
+        # dataDir: /var/lib/dsh-plane
         # perPage: 50
         # timeoutMs: 30000

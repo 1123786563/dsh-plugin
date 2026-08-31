@@ -174,23 +174,7 @@ export class PlaneClient {
    * @returns the normalized page.
    */
   pageOf(payload: unknown): Page<Record<string, unknown>> {
-    if (Array.isArray(payload)) {
-      return { results: payload.filter(isRow), totalCount: payload.length, nextCursor: undefined, hasNextPage: false }
-    }
-    if (!isRow(payload)) {
-      throw new PlaneApiError('Plane returned an unexpected list payload', undefined, '/api/v1')
-    }
-    const rows = Array.isArray(payload.results) ? payload.results.filter(isRow) : []
-    const nextCursor = typeof payload.next_cursor === 'string' && payload.next_cursor.length > 0
-      ? payload.next_cursor
-      : undefined
-    return {
-      results: rows,
-      totalCount: typeof payload.total_count === 'number' ? payload.total_count : undefined,
-      nextCursor,
-      hasNextPage: payload.next_page_results === true
-        || (nextCursor !== undefined && payload.next_page_results === undefined),
-    }
+    return normalizePlanePage(payload)
   }
 
   /**
@@ -214,12 +198,38 @@ export class PlaneClient {
 }
 
 /**
+ * Normalize a decoded Plane list payload into a Page regardless of envelope
+ * generation (cursor envelope or plain array).
+ * @param payload - the decoded list body.
+ * @returns the normalized page.
+ */
+export function normalizePlanePage(payload: unknown): Page<Record<string, unknown>> {
+  if (Array.isArray(payload)) {
+    return { results: payload.filter(isRow), totalCount: payload.length, nextCursor: undefined, hasNextPage: false }
+  }
+  if (!isRow(payload)) {
+    throw new PlaneApiError('Plane returned an unexpected list payload', undefined, '/api/v1')
+  }
+  const rows = Array.isArray(payload.results) ? payload.results.filter(isRow) : []
+  const nextCursor = typeof payload.next_cursor === 'string' && payload.next_cursor.length > 0
+    ? payload.next_cursor
+    : undefined
+  return {
+    results: rows,
+    totalCount: typeof payload.total_count === 'number' ? payload.total_count : undefined,
+    nextCursor,
+    hasNextPage: payload.next_page_results === true
+      || (nextCursor !== undefined && payload.next_page_results === undefined),
+  }
+}
+
+/**
  * Build the item-resource path for one segment and scope.
  * @param segment - work-items or issues.
  * @param scope - workspace, optional project, and optional tail below the item segment.
  * @returns the rooted API path with a trailing slash.
  */
-function itemPath(segment: string, scope: ItemScope): string {
+export function itemPath(segment: string, scope: ItemScope): string {
   let path = '/api/v1/workspaces/' + encodeURIComponent(scope.workspace)
   if (scope.project !== undefined && scope.project.length > 0) {
     path += '/projects/' + encodeURIComponent(scope.project)
@@ -236,7 +246,7 @@ function itemPath(segment: string, scope: ItemScope): string {
  * @param path - a path starting with /api/v1, or a suffix to append to it.
  * @returns the normalized slash-joined path.
  */
-function normalizeApiPath(path: string): string {
+export function normalizeApiPath(path: string): string {
   if (path.includes('://')) {
     throw new PlaneApiError('plane paths are API-relative; absolute URLs are not accepted', undefined, path)
   }

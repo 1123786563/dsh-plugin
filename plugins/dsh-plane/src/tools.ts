@@ -13,7 +13,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue, ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { PlaneClient } from './client.ts'
+import type { PlaneBackend } from './backend.ts'
 import type { Page } from './client.ts'
 import type { Config } from './config.ts'
 import { commentKeys, issueKeys, issueLine, metadataKeys, projectKeys, projectRows } from './view.ts'
@@ -37,23 +37,31 @@ const ISSUE_BODY_FIELDS = {
 } as const
 
 /**
+ * Supplies the live backend per call: the local engine or the remote client,
+ * picked from the current settings so backend flips apply without a restart.
+ */
+export type BackendFactory = () => PlaneBackend | Promise<PlaneBackend>
+
+/**
  * Register the plane_* tools on the host tools service.
  * @param ctx - host context carrying the tools service.
- * @param client - the activation's Plane client.
+ * @param getBackend - the activation's backend factory.
  * @param config - the activation's resolved config.
  */
-export function registerPlaneTools(ctx: Context, client: PlaneClient, getConfig: () => Config): void {
-  ctx.tools.register(planeListProjects(client, getConfig))
-  ctx.tools.register(planeListIssues(client, getConfig))
-  ctx.tools.register(planeSearchIssues(client, getConfig))
-  ctx.tools.register(planeGetIssue(client, getConfig))
-  ctx.tools.register(planeCreateIssue(client, getConfig))
-  ctx.tools.register(planeUpdateIssue(client, getConfig))
-  ctx.tools.register(planeDeleteIssue(client, getConfig))
-  ctx.tools.register(planeListIssueComments(client, getConfig))
-  ctx.tools.register(planeCreateIssueComment(client, getConfig))
-  ctx.tools.register(planeListMetadata(client, getConfig))
-  ctx.tools.register(planeRequest(client))
+export function registerPlaneTools(ctx: Context, getBackend: BackendFactory, getConfig: () => Config): void {
+  ctx.tools.register(planeListProjects(getBackend, getConfig))
+  ctx.tools.register(planeCreateProject(getBackend, getConfig))
+  ctx.tools.register(planeUpdateProject(getBackend, getConfig))
+  ctx.tools.register(planeListIssues(getBackend, getConfig))
+  ctx.tools.register(planeSearchIssues(getBackend, getConfig))
+  ctx.tools.register(planeGetIssue(getBackend, getConfig))
+  ctx.tools.register(planeCreateIssue(getBackend, getConfig))
+  ctx.tools.register(planeUpdateIssue(getBackend, getConfig))
+  ctx.tools.register(planeDeleteIssue(getBackend, getConfig))
+  ctx.tools.register(planeListIssueComments(getBackend, getConfig))
+  ctx.tools.register(planeCreateIssueComment(getBackend, getConfig))
+  ctx.tools.register(planeListMetadata(getBackend, getConfig))
+  ctx.tools.register(planeRequest(getBackend))
 }
 
 /**
@@ -169,11 +177,11 @@ const WORKSPACE_PARAM = {
 
 /**
  * Tool: list Plane projects page by page.
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeListProjects(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeListProjects(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_list_projects',
     description: 'List projects in a Plane workspace, one cursor page at a time. Triggers: discover the project id '
@@ -197,6 +205,7 @@ function planeListProjects(client: PlaneClient, getConfig: () => Config): ToolDe
     },
     async execute(args, exec) {
       const config = getConfig()
+      const client = await getBackend()
       const payload = await client.request(
         'GET',
         '/workspaces/' + encodeURIComponent(workspaceOf(config, args.workspace)) + '/projects/',
@@ -216,12 +225,107 @@ function planeListProjects(client: PlaneClient, getConfig: () => Config): ToolDe
 }
 
 /**
- * Tool: list work items in one project.
- * @param client - activation client.
+ * Tool: create a project.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeListIssues(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeCreateProject(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
+  return defineTool({
+    name: 'plane_create_project',
+    description: 'Create a Plane project. Triggers: start tracking work for a new effort, split work into a separate '
+      + 'board. New projects get Plane\'s default workflow states.',
+    parameters: {
+      name: { type: 'string', required: true, description: 'Project name.' },
+      identifier: { type: 'string', required: true, description: 'Short project key prepended to work-item ids (e.g. ENG in ENG-12); 1-12 letters or digits.' },
+      description: { type: 'string', description: 'Project description.' },
+      network: { type: 'string', enum: ['secret', 'public'], description: 'Visibility: secret (default) or public.' },
+      ...WORKSPACE_PARAM,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: { project: { type: 'json', required: true } },
+      },
+      render: (_args, value) => renderLines('Created Plane project', [value.project as Record<string, unknown>], row => {
+        return String(row.identifier ?? '') + ' ' + String(row.name ?? '') + ' (' + String(row.id) + ')'
+      }),
+    },
+    async execute(args, exec) {
+      const config = getConfig()
+      if (args.name.trim().length === 0) throw new Error('name must be a non-empty string')
+      const client = await getBackend()
+      const body: Record<string, unknown> = { name: args.name, identifier: args.identifier }
+      if (args.description !== undefined) body.description = args.description
+      if (args.network !== undefined) body.network = args.network
+      const project = await client.request(
+        'POST',
+        '/workspaces/' + encodeURIComponent(workspaceOf(config, args.workspace)) + '/projects/',
+        { body, signal: exec.signal },
+      )
+      return { project: project as JsonValue }
+    },
+  })
+}
+
+/**
+ * Tool: partially update a project.
+ * @param getBackend - activation backend factory.
+ * @param config - activation config.
+ * @returns the tool definition.
+ */
+function planeUpdateProject(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
+  return defineTool({
+    name: 'plane_update_project',
+    description: 'Partially update one Plane project: rename, change its identifier, description, or visibility. '
+      + 'Triggers: correct a typo in a project name, retarget the project key.',
+    parameters: {
+      projectId: { type: 'string', required: true, description: 'Plane project id (uuid).' },
+      name: { type: 'string', description: 'New project name.' },
+      identifier: { type: 'string', description: 'New short project key, 1-12 letters or digits.' },
+      description: { type: 'string', description: 'New description.' },
+      network: { type: 'string', enum: ['secret', 'public'], description: 'New visibility.' },
+      ...WORKSPACE_PARAM,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: { project: { type: 'json', required: true } },
+      },
+      render: (_args, value) => renderLines('Updated Plane project', [value.project as Record<string, unknown>], row => {
+        return String(row.identifier ?? '') + ' ' + String(row.name ?? '') + ' (' + String(row.id) + ')'
+      }),
+    },
+    async execute(args, exec) {
+      const config = getConfig()
+      const body: Record<string, unknown> = {}
+      if (args.name !== undefined) body.name = args.name
+      if (args.identifier !== undefined) body.identifier = args.identifier
+      if (args.description !== undefined) body.description = args.description
+      if (args.network !== undefined) body.network = args.network
+      if (Object.keys(body).length === 0) {
+        throw new Error('provide at least one field to update (name, identifier, description, network)')
+      }
+      const client = await getBackend()
+      const project = await client.request(
+        'PATCH',
+        '/workspaces/' + encodeURIComponent(workspaceOf(config, args.workspace)) + '/projects/' + encodeURIComponent(args.projectId) + '/',
+        { body, signal: exec.signal },
+      )
+      return { project: project as JsonValue }
+    },
+  })
+}
+
+/**
+ * Tool: list work items in one project.
+ * @param getBackend - activation backend factory.
+ * @param config - activation config.
+ * @returns the tool definition.
+ */
+function planeListIssues(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_list_issues',
     description: 'List work items (issues) in one Plane project, one cursor page at a time; order by -created_at for '
@@ -243,6 +347,7 @@ function planeListIssues(client: PlaneClient, getConfig: () => Config): ToolDefi
     },
     async execute(args, exec) {
       const config = getConfig()
+      const client = await getBackend()
       const payload = await client.requestItems('GET', {
         workspace: workspaceOf(config, args.workspace),
         project: projectOf(config, args.projectId),
@@ -258,11 +363,11 @@ function planeListIssues(client: PlaneClient, getConfig: () => Config): ToolDefi
 
 /**
  * Tool: search work items by text.
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeSearchIssues(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeSearchIssues(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_search_issues',
     description: 'Search Plane work items by name, description, or identifier (e.g. ENG-123) across the workspace or '
@@ -285,6 +390,7 @@ function planeSearchIssues(client: PlaneClient, getConfig: () => Config): ToolDe
     },
     async execute(args, exec) {
       const config = getConfig()
+      const client = await getBackend()
       const projectId = (args.projectId ?? config.defaultProjectId).trim()
       const payload = await client.requestItems('GET', { workspace: workspaceOf(config, args.workspace), tail: 'search' }, {
         query: {
@@ -303,11 +409,11 @@ function planeSearchIssues(client: PlaneClient, getConfig: () => Config): ToolDe
 
 /**
  * Tool: fetch one work item with full detail.
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeGetIssue(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeGetIssue(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_get_issue',
     description: 'Fetch one Plane work item by id with its full payload: description, state, assignees, labels, dates. '
@@ -327,6 +433,7 @@ function planeGetIssue(client: PlaneClient, getConfig: () => Config): ToolDefini
     },
     async execute(args, exec) {
       const config = getConfig()
+      const client = await getBackend()
       const issue = await client.requestItems('GET', {
         workspace: workspaceOf(config, args.workspace),
         project: projectOf(config, args.projectId),
@@ -339,11 +446,11 @@ function planeGetIssue(client: PlaneClient, getConfig: () => Config): ToolDefini
 
 /**
  * Tool: create a work item.
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeCreateIssue(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeCreateIssue(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_create_issue',
     description: 'Create a Plane work item. Triggers: file work found during coding or research into the tracker, '
@@ -373,6 +480,7 @@ function planeCreateIssue(client: PlaneClient, getConfig: () => Config): ToolDef
     async execute(args, exec) {
       const config = getConfig()
       if (args.name.trim().length === 0) throw new Error('name must be a non-empty string')
+      const client = await getBackend()
       const issue = await client.requestItems('POST', {
         workspace: workspaceOf(config, args.workspace),
         project: projectOf(config, args.projectId),
@@ -384,11 +492,11 @@ function planeCreateIssue(client: PlaneClient, getConfig: () => Config): ToolDef
 
 /**
  * Tool: update a work item partially.
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeUpdateIssue(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeUpdateIssue(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_update_issue',
     description: 'Partially update one Plane work item: rename, reprioritize, move across states, reassign, set dates. '
@@ -418,6 +526,7 @@ function planeUpdateIssue(client: PlaneClient, getConfig: () => Config): ToolDef
     },
     async execute(args, exec) {
       const config = getConfig()
+      const client = await getBackend()
       const body = issueBody(args as unknown as Record<string, unknown>, ISSUE_BODY_FIELDS)
       if (Object.keys(body).length === 0) {
         throw new Error(
@@ -436,11 +545,11 @@ function planeUpdateIssue(client: PlaneClient, getConfig: () => Config): ToolDef
 
 /**
  * Tool: delete a work item.
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeDeleteIssue(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeDeleteIssue(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_delete_issue',
     description: 'Delete one Plane work item permanently. Triggers: remove a duplicate or wrongly-filed item; '
@@ -463,6 +572,7 @@ function planeDeleteIssue(client: PlaneClient, getConfig: () => Config): ToolDef
     },
     async execute(args, exec) {
       const config = getConfig()
+      const client = await getBackend()
       await client.requestItems('DELETE', {
         workspace: workspaceOf(config, args.workspace),
         project: projectOf(config, args.projectId),
@@ -475,11 +585,11 @@ function planeDeleteIssue(client: PlaneClient, getConfig: () => Config): ToolDef
 
 /**
  * Tool: list comments on one work item.
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeListIssueComments(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeListIssueComments(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_list_issue_comments',
     description: 'List comments on one Plane work item, one cursor page at a time. Triggers: read the discussion '
@@ -509,6 +619,7 @@ function planeListIssueComments(client: PlaneClient, getConfig: () => Config): T
     },
     async execute(args, exec) {
       const config = getConfig()
+      const client = await getBackend()
       const payload = await client.requestItems('GET', {
         workspace: workspaceOf(config, args.workspace),
         project: projectOf(config, args.projectId),
@@ -525,11 +636,11 @@ function planeListIssueComments(client: PlaneClient, getConfig: () => Config): T
 
 /**
  * Tool: comment on one work item.
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeCreateIssueComment(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeCreateIssueComment(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_create_issue_comment',
     description: 'Add a comment to one Plane work item as the API-key owner. Triggers: report progress or findings on '
@@ -551,6 +662,7 @@ function planeCreateIssueComment(client: PlaneClient, getConfig: () => Config): 
     async execute(args, exec) {
       const config = getConfig()
       if (args.commentHtml.trim().length === 0) throw new Error('commentHtml must be a non-empty string')
+      const client = await getBackend()
       const comment = await client.requestItems('POST', {
         workspace: workspaceOf(config, args.workspace),
         project: projectOf(config, args.projectId),
@@ -563,11 +675,11 @@ function planeCreateIssueComment(client: PlaneClient, getConfig: () => Config): 
 
 /**
  * Tool: list project metadata (states, labels, cycles).
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @param config - activation config.
  * @returns the tool definition.
  */
-function planeListMetadata(client: PlaneClient, getConfig: () => Config): ToolDefinition {
+function planeListMetadata(getBackend: BackendFactory, getConfig: () => Config): ToolDefinition {
   return defineTool({
     name: 'plane_list_metadata',
     description: 'List one project metadata kind: states (workflow columns with their group), labels, or cycles '
@@ -599,6 +711,7 @@ function planeListMetadata(client: PlaneClient, getConfig: () => Config): ToolDe
     },
     async execute(args, exec) {
       const config = getConfig()
+      const client = await getBackend()
       const resource = args.resource as MetadataResource
       const payload = await client.request(
         'GET',
@@ -620,10 +733,10 @@ function planeListMetadata(client: PlaneClient, getConfig: () => Config): ToolDe
 
 /**
  * Tool: raw request against any Plane endpoint.
- * @param client - activation client.
+ * @param getBackend - activation backend factory.
  * @returns the tool definition.
  */
-function planeRequest(client: PlaneClient): ToolDefinition {
+function planeRequest(getBackend: BackendFactory): ToolDefinition {
   return defineTool({
     name: 'plane_request',
     description: 'Raw request to the Plane REST API for everything the named tools do not cover: modules, intake, '
@@ -645,6 +758,7 @@ function planeRequest(client: PlaneClient): ToolDefinition {
       render: (_args, value) => [{ type: 'text', text: 'Plane response: ' + JSON.stringify(value.body).slice(0, 2000) }],
     },
     async execute(args, exec) {
+      const client = await getBackend()
       const body = await client.request(args.method, args.path, {
         query: normalizeQuery(args.query),
         body: args.body,

@@ -7,9 +7,10 @@
  * @module dsh-plane/client/card
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { PlaneCardState, PlaneField, PlaneFieldState } from './form.ts'
+import { PLANE_BACKENDS } from './form.ts'
 import { dictionary, format } from './locales.ts'
 
 /** Copy reader: unknown keys fall back to the key itself (never crashes a render). */
@@ -64,11 +65,18 @@ export function PlaneSettingsCard(props: PlaneSettingsCardProps): ReactNode {
           {state.failed && (
             <p style={warnStyle}>{t('saveFailed')}{state.failedReason === undefined ? '' : ': ' + state.failedReason}</p>
           )}
-          <TextField {...fieldProps} id="plane-base-url" field="baseUrl" state={state.fields.baseUrl} onEdit={props.edit} onReset={props.resetField} />
-          <TextField {...fieldProps} id="plane-api-key" field="apiKey" state={state.fields.apiKey} secret onEdit={props.edit} onReset={props.resetField} />
+          <BackendField {...fieldProps} id="plane-backend" state={state.fields.backend} onEdit={props.edit} />
+          {state.backend === 'remote' && (
+            <>
+              <TextField {...fieldProps} id="plane-base-url" field="baseUrl" state={state.fields.baseUrl} onEdit={props.edit} onReset={props.resetField} />
+              <TextField {...fieldProps} id="plane-api-key" field="apiKey" state={state.fields.apiKey} secret onEdit={props.edit} onReset={props.resetField} />
+            </>
+          )}
+          {state.backend === 'local' && <TextField {...fieldProps} id="plane-data-dir" field="dataDir" state={state.fields.dataDir} onEdit={props.edit} onReset={props.resetField} />}
           <TextField {...fieldProps} id="plane-workspace" field="workspaceSlug" state={state.fields.workspaceSlug} onEdit={props.edit} onReset={props.resetField} />
           <TextField {...fieldProps} id="plane-project" field="defaultProjectId" state={state.fields.defaultProjectId} onEdit={props.edit} onReset={props.resetField} />
           <TextField {...fieldProps} id="plane-per-page" field="perPage" state={state.fields.perPage} numeric onEdit={props.edit} onReset={props.resetField} />
+          {state.backend === 'local' && <EngineStatus />}
           <div style={footerStyle}>
             <button type="button" style={buttonStyle} disabled={!state.dirty || disabled} onClick={() => { props.discard?.() }}>{t('discard')}</button>
             <button type="button" style={primaryButtonStyle} disabled={!state.dirty || state.invalid || disabled} onClick={() => { props.save?.() }}>{state.saving ? t('saving') : t('save')}</button>
@@ -76,6 +84,80 @@ export function PlaneSettingsCard(props: PlaneSettingsCardProps): ReactNode {
         </div>
       )}
     </section>
+  )
+}
+
+/** One labeled backend selector between the local engine and a remote instance. */
+function BackendField(props: {
+  t: T
+  id: string
+  state: PlaneFieldState
+  disabled: boolean
+  onEdit?: ((field: PlaneField, text: string) => void) | undefined
+}) {
+  const { t, state } = props
+  return (
+    <div style={fieldStyle}>
+      <label style={labelStyle} htmlFor={props.id}>{t('backend')}</label>
+      <select
+        id={props.id}
+        style={inputStyle}
+        disabled={props.disabled}
+        value={PLANE_BACKENDS.includes(state.text) ? state.text : 'local'}
+        onChange={event => { props.onEdit?.('backend', event.target.value) }}
+      >
+        <option value="local">{t('backendLocal')}</option>
+        <option value="remote">{t('backendRemote')}</option>
+      </select>
+      <p style={hintStyle}>{t('backendHint')}</p>
+    </div>
+  )
+}
+
+/** Engine status block: row counts and the local key, read from the state route. */
+function EngineStatus(): ReactNode {
+  const t = (key: string, params?: Record<string, string | number>): string => {
+    const dict = dictionary() as Record<string, string>
+    const raw = dict[key] ?? key
+    return params === undefined ? raw : format(raw, params)
+  }
+  const [engine, setEngine] = useState<Record<string, unknown> | undefined>(undefined)
+  const [error, setError] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    let live = true
+    fetch('/plugins/dsh-plane/state', { headers: { accept: 'application/json' } })
+      .then(async response => {
+        const data = JSON.parse(await response.text()) as Record<string, unknown>
+        if (!live) return
+        if (data.engine === undefined) {
+          setError(typeof data.engineError === 'string' ? data.engineError : 'unavailable')
+          return
+        }
+        setEngine(data.engine as Record<string, unknown>)
+      })
+      .catch(fetchError => { if (live) setError(fetchError instanceof Error ? fetchError.message : String(fetchError)) })
+    return () => { live = false }
+  }, [])
+  if (error !== undefined) {
+    return <p style={warnStyle}>{t('engineUnavailable')}: {error}</p>
+  }
+  if (engine === undefined) return null
+  const key = typeof engine.apiKey === 'string' ? engine.apiKey : ''
+  return (
+    <div style={engineBoxStyle}>
+      <span style={labelStyle}>{t('engineTitle')}</span>
+      <p style={hintStyle}>{t('engineCounts', {
+        projects: Number(engine.projects ?? 0),
+        workItems: Number(engine.workItems ?? 0),
+        comments: Number(engine.comments ?? 0),
+      })}</p>
+      {key.length > 0 && (
+        <>
+          <p style={hintStyle}>{t('engineKeyLabel')}</p>
+          <code style={codeStyle}>{key}</code>
+        </>
+      )}
+    </div>
   )
 }
 
@@ -164,6 +246,8 @@ const inputBase: CSSProperties = {
 const inputStyle: CSSProperties = inputBase
 const invalidInputStyle: CSSProperties = { ...inputBase, borderColor: 'var(--dsw-alias-danger, #d05050)' }
 const invalidHintStyle: CSSProperties = { ...hintStyle, color: 'var(--dsw-alias-danger, #d05050)' }
+const engineBoxStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4, padding: '8px 10px', borderRadius: 8, border: '1px solid var(--dsw-alias-border, rgba(128, 128, 128, 0.22))' }
+const codeStyle: CSSProperties = { margin: 0, fontSize: 10.5, padding: '4px 6px', borderRadius: 6, background: 'var(--dsw-alias-surface-2, rgba(128,128,128,0.14))', wordBreak: 'break-all', userSelect: 'text' }
 const resetStyle: CSSProperties = { all: 'unset', cursor: 'pointer', fontSize: 11, color: 'var(--dsw-alias-accent, #4c8bf5)' }
 const footerStyle: CSSProperties = { display: 'flex', justifyContent: 'flex-end', gap: 8 }
 const buttonStyle: CSSProperties = {
