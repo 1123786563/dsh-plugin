@@ -1,0 +1,449 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "dsh-plugin Runtime Architecture",
+    "output": "dsh-plugin-runtime.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/1123786563/dsh-plugin",
+      "revision": "e8d85d41a21456dcfba0d8c5a2b149b89b8c3f5b"
+    },
+    "viewBox": [
+      1960,
+      560
+    ]
+  },
+  "components": [
+    {
+      "id": "browser",
+      "type": "external",
+      "label": "Browser",
+      "sublabel": "DSH Web SPA",
+      "pos": [
+        20,
+        55
+      ],
+      "size": [
+        150,
+        95
+      ]
+    },
+    {
+      "id": "gateway",
+      "type": "security",
+      "label": "casdoor-gateway",
+      "sublabel": "auth reverse proxy · SQLite sessions",
+      "tag": ":3080 public",
+      "pos": [
+        270,
+        30
+      ],
+      "size": [
+        185,
+        125
+      ],
+      "sources": [
+        {
+          "path": "services/casdoor-gateway/README.md",
+          "label": "gateway service"
+        },
+        {
+          "path": "services/casdoor-gateway/src/identity-token.ts",
+          "label": "DshIdentityToken minting"
+        }
+      ]
+    },
+    {
+      "id": "dsh-host",
+      "type": "backend",
+      "label": "DSH host — dsh web",
+      "sublabel": "webserver · agent runtime · cordis plugin host",
+      "tag": ":38080 loopback",
+      "pos": [
+        570,
+        30
+      ],
+      "size": [
+        790,
+        125
+      ],
+      "sources": [
+        {
+          "path": "CONTEXT.md",
+          "label": "host and plugin boundary"
+        }
+      ]
+    },
+    {
+      "id": "llm-upstream",
+      "type": "external",
+      "label": "LLM providers",
+      "sublabel": "deepseek-official · higress route",
+      "pos": [
+        1610,
+        45
+      ],
+      "size": [
+        195,
+        105
+      ],
+      "sources": [
+        {
+          "path": "plugins/dsh-higress/src/index.ts",
+          "label": "higress provider route"
+        }
+      ]
+    },
+    {
+      "id": "plugin-auth",
+      "type": "security",
+      "label": "dsh-casdoor-auth",
+      "sublabel": "zero-trust request guard",
+      "pos": [
+        570,
+        255
+      ],
+      "size": [
+        195,
+        100
+      ],
+      "sources": [
+        {
+          "path": "plugins/dsh-casdoor-auth/CONTEXT.md",
+          "label": "login gate glossary"
+        }
+      ]
+    },
+    {
+      "id": "plugin-tenant",
+      "type": "backend",
+      "label": "dsh-multi-tenant",
+      "sublabel": "session ownership · tenant isolation",
+      "pos": [
+        795,
+        255
+      ],
+      "size": [
+        205,
+        100
+      ],
+      "sources": [
+        {
+          "path": "plugins/dsh-multi-tenant/packages/multi-tenant/src/sqlite-store.ts",
+          "label": "session_owners store"
+        }
+      ]
+    },
+    {
+      "id": "plugin-openmeter",
+      "type": "backend",
+      "label": "dsh-openmeter",
+      "sublabel": "LLM metering · prepaid gate · cashier",
+      "pos": [
+        1030,
+        255
+      ],
+      "size": [
+        210,
+        100
+      ],
+      "sources": [
+        {
+          "path": "plugins/dsh-openmeter/CONTEXT.md",
+          "label": "billing glossary"
+        }
+      ]
+    },
+    {
+      "id": "plugin-tools",
+      "type": "backend",
+      "label": "tool plugins",
+      "sublabel": "plane · job-search · open-design",
+      "pos": [
+        1270,
+        255
+      ],
+      "size": [
+        175,
+        100
+      ],
+      "sources": [
+        {
+          "path": "README.md",
+          "label": "plugin roster"
+        }
+      ]
+    },
+    {
+      "id": "casdoor",
+      "type": "cloud",
+      "label": "Casdoor",
+      "sublabel": "OIDC IdP · orgs = tenants",
+      "tag": ":8001",
+      "pos": [
+        265,
+        435
+      ],
+      "size": [
+        195,
+        95
+      ],
+      "sources": [
+        {
+          "path": "docker-compose.yml",
+          "line": 42,
+          "label": "compose service"
+        },
+        {
+          "path": "services/casdoor-gateway/docker/init_data.json",
+          "label": "seed orgs and apps"
+        }
+      ]
+    },
+    {
+      "id": "openmeter",
+      "type": "cloud",
+      "label": "OpenMeter fork",
+      "sublabel": "billing API · sink/balance/billing workers",
+      "tag": ":8888",
+      "pos": [
+        700,
+        435
+      ],
+      "size": [
+        230,
+        95
+      ],
+      "sources": [
+        {
+          "path": "docker-compose.yml",
+          "line": 138,
+          "label": "fork stack"
+        },
+        {
+          "path": "services/openmeter/openmeter.yaml",
+          "label": "meters and prices"
+        }
+      ]
+    },
+    {
+      "id": "compose-infra",
+      "type": "database",
+      "label": "docker compose infrastructure",
+      "sublabel": "shared Postgres · Kafka · ClickHouse · Redis",
+      "pos": [
+        1060,
+        435
+      ],
+      "size": [
+        300,
+        95
+      ],
+      "sources": [
+        {
+          "path": "docker-compose.yml",
+          "label": "single compose file"
+        }
+      ]
+    },
+    {
+      "id": "nocobase",
+      "type": "cloud",
+      "label": "NocoBase",
+      "sublabel": "low-code · casdoor OIDC login",
+      "tag": ":13000",
+      "pos": [
+        1490,
+        435
+      ],
+      "size": [
+        210,
+        95
+      ],
+      "sources": [
+        {
+          "path": "docker-compose.yml",
+          "line": 202,
+          "label": "pinned 2.2.2"
+        },
+        {
+          "path": "services/nocobase/plugin-auth-casdoor/package.json",
+          "label": "casdoor auth plugin"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "DSH host process — zero-trust loopback :38080",
+      "wraps": [
+        "dsh-host",
+        "plugin-auth",
+        "plugin-tenant",
+        "plugin-openmeter",
+        "plugin-tools"
+      ],
+      "pad": 16
+    },
+    {
+      "kind": "region",
+      "label": "docker compose network — loopback-published ports",
+      "wraps": [
+        "casdoor",
+        "openmeter",
+        "compose-infra",
+        "nocobase"
+      ],
+      "pad": 16
+    }
+  ],
+  "connections": [
+    {
+      "id": "c-browser-gateway",
+      "from": "browser",
+      "to": "gateway",
+      "label": "HTTPS / WS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "c-gateway-host",
+      "from": "gateway",
+      "to": "dsh-host",
+      "label": "x-dsh-identity",
+      "variant": "emphasis"
+    },
+    {
+      "id": "c-host-llm",
+      "from": "dsh-host",
+      "to": "llm-upstream",
+      "label": "model call",
+      "variant": "emphasis"
+    },
+    {
+      "id": "c-host-guard",
+      "from": "dsh-host",
+      "to": "plugin-auth",
+      "label": "zero-trust guard",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c-gateway-jwks",
+      "from": "gateway",
+      "to": "plugin-auth",
+      "label": "public JWKS",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c-host-meter",
+      "from": "dsh-host",
+      "to": "plugin-openmeter",
+      "label": "meter + balance gate",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c-om-ingest",
+      "from": "plugin-openmeter",
+      "to": "openmeter",
+      "label": "ingest · balance query",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c-oidc",
+      "from": "gateway",
+      "to": "casdoor",
+      "label": "OIDC code + PKCE",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        362,
+        300
+      ]
+    },
+    {
+      "id": "c-om-data",
+      "from": "openmeter",
+      "to": "compose-infra",
+      "label": "events · balances"
+    },
+    {
+      "id": "c-noco-db",
+      "from": "nocobase",
+      "to": "compose-infra",
+      "label": "nocobase DB",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Primary request path",
+      "items": [
+        "Only public port: gateway :3080, HttpOnly dsh_sid session",
+        "Gateway forwards HTTP/WS to loopback :38080",
+        "x-dsh-identity: Ed25519 JWT, 60 s TTL, minted per request",
+        "Guard verifies it via gateway JWKS — fail-closed",
+        "Model calls metered + balance-gated in the host"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trust boundaries",
+      "items": [
+        "dsh webserver binds 127.0.0.1 — never exposed",
+        "Zero-trust private port: static assets and WS need a token",
+        "Gateway down = private port unusable (fail-closed)",
+        "15 privileged /api methods require the dsh-admin role",
+        "Compose ports loopback-only: :8001 / :8888 / :13000"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Billing — dsh-openmeter",
+      "items": [
+        "Meters every LLM call; subagents via rootSessionId",
+        "WAL at-least-once delivery + 32-day dedup window",
+        "Prepaid wallet: hard block when empty; outage fails open",
+        "tenant→subject mapping explicit — no house fallback",
+        "CNY quotes from llm-cost; cashier panel is the only admin UI"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Tenant isolation — dsh-multi-tenant",
+      "items": [
+        "session_owners: claim-once {tenantId, userId} per session",
+        "Visibility + mux frame filtering scope every event stream",
+        "dsh-admin exempt; unowned sessions denied (fail-closed)",
+        "401 unauthenticated · 403 unmapped/forbidden — no leaks"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Plugin roster (cordis bundle patches)",
+      "items": [
+        "dsh-plane — Plane REST tools",
+        "dsh-job-search — tenant-isolated job pipeline",
+        "dsh-open-design — 75 skills · 152 design systems",
+        "dsh-higress — OpenAI-compatible provider route",
+        "dsh-nocobase — deploy wiring + health card"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "Deployment facts",
+      "items": [
+        "One compose file: casdoor + OpenMeter fork + NocoBase 2.2.2",
+        "Kafka · ClickHouse · Redis internal; one shared Postgres",
+        "NocoBase OIDC login (JIT + email bind) — separate chain",
+        "OpenMeter images build from the ../openmeter fork (v3 API)"
+      ]
+    }
+  ]
+}

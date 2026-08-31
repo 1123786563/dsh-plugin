@@ -8,3 +8,6 @@ coverage/
 .mimosa/
 .env
 .playwright-mcp/
+
+# 独立维护的嵌套仓库（fork of zhu1090093659/dsh-web，有自己的 .git）
+dsh-web/
